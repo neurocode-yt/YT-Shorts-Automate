@@ -2711,88 +2711,297 @@ class VideoEditorApp:
         return box
 
     def open_trim_clips_dialog(self) -> None:
+        duration = self.preview_engine.duration_sec if self.preview_engine.is_loaded() else 0.0
+        if duration <= 0 and self.video_path_var.get().strip():
+            duration = get_video_duration(self.video_path_var.get().strip())
+        if duration <= 0:
+            messagebox.showerror("Trim Clips", "Load a video before trimming repeated clips.")
+            return
+
         dialog = tk.Toplevel(self.root)
         dialog.title("Trim Repeated Clips")
+        dialog.configure(bg=THEME["bg"])
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
 
-        content = ttk.Frame(dialog, padding=12)
+        content = ttk.Frame(dialog, padding=14)
         content.pack(fill=tk.BOTH, expand=True)
-        for col in range(3):
-            content.columnconfigure(col, weight=1)
+        content.columnconfigure(0, weight=1)
 
-        duration = self.preview_engine.duration_sec if self.preview_engine.is_loaded() else 0.0
-        if duration <= 0 and self.video_path_var.get().strip():
-            duration = get_video_duration(self.video_path_var.get().strip())
-
+        header = ttk.Frame(content)
+        header.grid(row=0, column=0, sticky=tk.EW)
+        header.columnconfigure(0, weight=1)
         ttk.Label(
-            content,
-            text=f"Source length: {format_time(duration)}. Set End to 0 to use the rest of the clip.",
+            header,
+            text=f"Drag the handles to choose each repeated copy. Source length: {format_time(duration)}",
             style="Muted.TLabel",
-        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
-        ttk.Label(content, text="Clip", style="Muted.TLabel").grid(row=1, column=0, sticky=tk.W)
-        ttk.Label(content, text="Start (sec)", style="Muted.TLabel").grid(row=1, column=1, sticky=tk.W, padx=(8, 0))
-        ttk.Label(content, text="End (sec)", style="Muted.TLabel").grid(row=1, column=2, sticky=tk.W, padx=(8, 0))
+        ).grid(row=0, column=0, sticky=tk.W)
+        ttk.Checkbutton(
+            header,
+            text="Repeat video twice on export",
+            variable=self.repeat_clip_twice_var,
+        ).grid(row=0, column=1, sticky=tk.E, padx=(14, 0))
 
-        clip1_start_var = tk.StringVar(value=self.clip1_trim_start_var.get())
-        clip1_end_var = tk.StringVar(value=self.clip1_trim_end_var.get())
-        clip2_start_var = tk.StringVar(value=self.clip2_trim_start_var.get())
-        clip2_end_var = tk.StringVar(value=self.clip2_trim_end_var.get())
-        fields = [
-            ("Clip 1", clip1_start_var, clip1_end_var),
-            ("Clip 2", clip2_start_var, clip2_end_var),
-        ]
-        entries: list[ttk.Entry] = []
-        for index, (label, start_var, end_var) in enumerate(fields, start=2):
-            ttk.Label(content, text=label).grid(row=index, column=0, sticky=tk.W, pady=(6, 0))
-            start_entry = ttk.Entry(content, textvariable=start_var, width=12)
-            start_entry.grid(row=index, column=1, sticky=tk.EW, padx=(8, 0), pady=(6, 0))
-            end_entry = ttk.Entry(content, textvariable=end_var, width=12)
-            end_entry.grid(row=index, column=2, sticky=tk.EW, padx=(8, 0), pady=(6, 0))
-            entries.extend([start_entry, end_entry])
+        total_var = tk.StringVar(value="")
+        drag_state: dict[str, object] = {"row": None, "mode": None, "x": 0.0, "start": 0.0, "end": duration}
+        trim_rows: list[dict[str, object]] = []
+        min_gap = max(0.001, min(0.1, duration * 0.01))
+        track_pad = 24
 
-        actions = ttk.Frame(content)
-        actions.grid(row=4, column=0, columnspan=3, sticky=tk.E, pady=(12, 0))
-
-        def parse_seconds(value: str, label: str) -> float:
+        def parse_saved_seconds(value: str) -> float:
             try:
-                number = float(value.strip() or "0")
-            except ValueError as exc:
-                raise ValueError(f"{label} must be a number.") from exc
-            if number < 0:
-                raise ValueError(f"{label} cannot be negative.")
-            return number
+                return max(0.0, float(value.strip() or "0"))
+            except (TypeError, ValueError):
+                return 0.0
+
+        def clamp(value: float, low: float, high: float) -> float:
+            return max(low, min(high, value))
+
+        def read_range(start_var: tk.StringVar, end_var: tk.StringVar) -> tuple[float, float]:
+            start = clamp(parse_saved_seconds(start_var.get()), 0.0, max(0.0, duration - min_gap))
+            end_raw = parse_saved_seconds(end_var.get())
+            end = duration if end_raw <= 0.0 or end_raw > duration else end_raw
+            if end <= start:
+                end = duration
+            if end <= start:
+                start = 0.0
+                end = duration
+            return start, end
+
+        def seconds_label(value: float) -> str:
+            return f"{format_ffmpeg_seconds(value)}s"
+
+        def row_width(row: dict[str, object]) -> int:
+            return max(520, int(row["canvas"].winfo_width()))
+
+        def seconds_to_x(row: dict[str, object], value: float) -> int:
+            width = row_width(row)
+            usable = max(1, width - (track_pad * 2))
+            return int(track_pad + (clamp(value, 0.0, duration) / duration) * usable)
+
+        def x_to_seconds(row: dict[str, object], x: float) -> float:
+            width = row_width(row)
+            usable = max(1, width - (track_pad * 2))
+            return clamp(((float(x) - track_pad) / usable) * duration, 0.0, duration)
+
+        def update_labels() -> None:
+            total = 0.0
+            for row in trim_rows:
+                start = float(row["start"])
+                end = float(row["end"])
+                total += max(0.0, end - start)
+                row["start_var"].set(f"Start {seconds_label(start)}")
+                row["end_var"].set(f"End {seconds_label(end)}")
+                row["length_var"].set(f"Length {seconds_label(end - start)}")
+            total_var.set(f"Repeated output length: {seconds_label(total)}")
+
+        def draw_row(row: dict[str, object]) -> None:
+            canvas: tk.Canvas = row["canvas"]
+            canvas.delete("all")
+            width = row_width(row)
+            height = max(74, int(canvas.winfo_height()))
+            track_y = 38
+            start = float(row["start"])
+            end = float(row["end"])
+            sx = seconds_to_x(row, start)
+            ex = seconds_to_x(row, end)
+
+            canvas.create_rectangle(
+                track_pad,
+                track_y - 7,
+                width - track_pad,
+                track_y + 7,
+                fill=THEME["border"],
+                outline="",
+            )
+            for tick in range(5):
+                fraction = tick / 4
+                x = int(track_pad + fraction * (width - track_pad * 2))
+                tick_time = duration * fraction
+                canvas.create_line(x, track_y + 11, x, track_y + 18, fill=THEME["text_muted"])
+                canvas.create_text(
+                    x,
+                    track_y + 30,
+                    text=format_timeline_time(tick_time),
+                    fill=THEME["text_muted"],
+                    font=("Segoe UI", 8),
+                )
+            canvas.create_rectangle(sx, track_y - 9, ex, track_y + 9, fill=THEME["accent"], outline="")
+            canvas.create_rectangle(
+                sx - 7,
+                12,
+                sx + 7,
+                height - 18,
+                fill=THEME["success"],
+                outline=THEME["text"],
+                width=1,
+            )
+            canvas.create_rectangle(
+                ex - 7,
+                12,
+                ex + 7,
+                height - 18,
+                fill=THEME["success"],
+                outline=THEME["text"],
+                width=1,
+            )
+            canvas.create_text(sx, 8, text="START", fill=THEME["success"], font=("Segoe UI", 7, "bold"))
+            canvas.create_text(ex, 8, text="END", fill=THEME["success"], font=("Segoe UI", 7, "bold"))
+
+        def redraw_all() -> None:
+            update_labels()
+            for row in trim_rows:
+                draw_row(row)
+
+        def hit_mode(row: dict[str, object], x: float) -> str:
+            sx = seconds_to_x(row, float(row["start"]))
+            ex = seconds_to_x(row, float(row["end"]))
+            if abs(x - sx) <= 12:
+                return "start"
+            if abs(x - ex) <= 12:
+                return "end"
+            if sx < x < ex:
+                return "range"
+            return "start" if abs(x - sx) < abs(x - ex) else "end"
+
+        def move_drag(row: dict[str, object], mode: str, x: float) -> None:
+            current = x_to_seconds(row, x)
+            start = float(drag_state["start"])
+            end = float(drag_state["end"])
+            if mode == "start":
+                row["start"] = clamp(current, 0.0, float(row["end"]) - min_gap)
+            elif mode == "end":
+                row["end"] = clamp(current, float(row["start"]) + min_gap, duration)
+            elif mode == "range":
+                anchor_seconds = x_to_seconds(row, float(drag_state["x"]))
+                delta = current - anchor_seconds
+                length = end - start
+                new_start = clamp(start + delta, 0.0, max(0.0, duration - length))
+                row["start"] = new_start
+                row["end"] = new_start + length
+            redraw_all()
+
+        def on_press(row: dict[str, object], event) -> None:
+            mode = hit_mode(row, event.x)
+            drag_state.update(
+                {
+                    "row": row,
+                    "mode": mode,
+                    "x": float(event.x),
+                    "start": float(row["start"]),
+                    "end": float(row["end"]),
+                }
+            )
+            row["canvas"].configure(cursor="sb_h_double_arrow" if mode != "range" else "fleur")
+            move_drag(row, mode, event.x)
+
+        def on_drag(event) -> None:
+            row = drag_state.get("row")
+            mode = drag_state.get("mode")
+            if not row or not mode:
+                return
+            move_drag(row, str(mode), event.x)
+
+        def on_release(_event=None) -> None:
+            row = drag_state.get("row")
+            if row:
+                row["canvas"].configure(cursor="")
+            drag_state.update({"row": None, "mode": None})
+
+        def on_motion(row: dict[str, object], event) -> None:
+            mode = hit_mode(row, event.x)
+            row["canvas"].configure(cursor="sb_h_double_arrow" if mode != "range" else "fleur")
+
+        def reset_row(row: dict[str, object]) -> None:
+            row["start"] = 0.0
+            row["end"] = duration
+            redraw_all()
+
+        def add_trim_row(
+            grid_row: int,
+            title: str,
+            start_var: tk.StringVar,
+            end_var: tk.StringVar,
+        ) -> dict[str, object]:
+            start, end = read_range(start_var, end_var)
+            box = ttk.LabelFrame(content, text=f"  {title}  ", padding=10, style="Card.TLabelframe")
+            box.grid(row=grid_row, column=0, sticky=tk.EW, pady=(12, 0))
+            box.columnconfigure(0, weight=1)
+            labels = ttk.Frame(box, style="Card.TFrame")
+            labels.grid(row=0, column=0, sticky=tk.EW)
+            labels.columnconfigure(3, weight=1)
+            start_label_var = tk.StringVar()
+            end_label_var = tk.StringVar()
+            length_label_var = tk.StringVar()
+            ttk.Label(labels, textvariable=start_label_var, style="Card.TLabel", width=14).grid(row=0, column=0, sticky=tk.W)
+            ttk.Label(labels, textvariable=end_label_var, style="Card.TLabel", width=14).grid(row=0, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Label(labels, textvariable=length_label_var, style="CardMuted.TLabel", width=16).grid(row=0, column=2, sticky=tk.W, padx=(8, 0))
+            row: dict[str, object] = {
+                "start": start,
+                "end": end,
+                "start_var": start_label_var,
+                "end_var": end_label_var,
+                "length_var": length_label_var,
+            }
+            ttk.Button(labels, text="Full Clip", command=lambda r=row: reset_row(r)).grid(row=0, column=4, sticky=tk.E)
+            canvas = tk.Canvas(
+                box,
+                width=660,
+                height=78,
+                bg=THEME["surface2"],
+                highlightthickness=1,
+                highlightbackground=THEME["border"],
+                cursor="sb_h_double_arrow",
+            )
+            canvas.grid(row=1, column=0, sticky=tk.EW, pady=(8, 0))
+            row["canvas"] = canvas
+            canvas.bind("<Configure>", lambda _event, r=row: draw_row(r))
+            canvas.bind("<Button-1>", lambda event, r=row: on_press(r, event))
+            canvas.bind("<B1-Motion>", on_drag)
+            canvas.bind("<ButtonRelease-1>", on_release)
+            canvas.bind("<Motion>", lambda event, r=row: on_motion(r, event))
+            return row
+
+        trim_rows.append(add_trim_row(1, "Clip 1", self.clip1_trim_start_var, self.clip1_trim_end_var))
+        trim_rows.append(add_trim_row(2, "Clip 2", self.clip2_trim_start_var, self.clip2_trim_end_var))
+
+        footer = ttk.Frame(content)
+        footer.grid(row=3, column=0, sticky=tk.EW, pady=(12, 0))
+        footer.columnconfigure(0, weight=1)
+        ttk.Label(footer, textvariable=total_var, style="Muted.TLabel").grid(row=0, column=0, sticky=tk.W)
+
+        actions = ttk.Frame(footer)
+        actions.grid(row=0, column=1, sticky=tk.E)
 
         def save_trim() -> None:
-            try:
-                values = [
-                    parse_seconds(clip1_start_var.get(), "Clip 1 start"),
-                    parse_seconds(clip1_end_var.get(), "Clip 1 end"),
-                    parse_seconds(clip2_start_var.get(), "Clip 2 start"),
-                    parse_seconds(clip2_end_var.get(), "Clip 2 end"),
-                ]
-                for clip_idx, start, end in ((1, values[0], values[1]), (2, values[2], values[3])):
-                    if end > 0 and end <= start:
-                        raise ValueError(f"Clip {clip_idx} end must be after start, or set End to 0.")
-                    if duration > 0 and start >= duration:
-                        raise ValueError(f"Clip {clip_idx} start must be before the source ends.")
-            except ValueError as exc:
-                messagebox.showerror("Trim Clips", str(exc), parent=dialog)
-                return
+            values = []
+            for row in trim_rows:
+                start = float(row["start"])
+                end = float(row["end"])
+                saved_end = 0.0 if abs(end - duration) <= 0.01 else end
+                values.extend([start, saved_end])
 
             self.clip1_trim_start_var.set(format_ffmpeg_seconds(values[0]))
             self.clip1_trim_end_var.set(format_ffmpeg_seconds(values[1]))
             self.clip2_trim_start_var.set(format_ffmpeg_seconds(values[2]))
             self.clip2_trim_end_var.set(format_ffmpeg_seconds(values[3]))
+            self.repeat_clip_twice_var.set(True)
             self._update_trim_summary()
             self._save_current_editor_state()
             dialog.destroy()
 
-        ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
-        ttk.Button(actions, text="Save Trim", command=save_trim, style="Accent.TButton").pack(side=tk.RIGHT, padx=(0, 8))
-        if entries:
-            entries[0].focus_set()
+        def reset_all() -> None:
+            for row in trim_rows:
+                row["start"] = 0.0
+                row["end"] = duration
+            redraw_all()
+
+        ttk.Button(actions, text="Save Trim", command=save_trim, style="Accent.TButton").pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(actions, text="Reset Both", command=reset_all).pack(side=tk.RIGHT, padx=(0, 8))
+        dialog.bind("<ButtonRelease-1>", on_release)
+        redraw_all()
 
     def _update_trim_summary(self) -> None:
         if not hasattr(self, "trim_summary_var"):

@@ -43,6 +43,7 @@ APP_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = APP_DIR / "settings.json"
 PRESETS_DIR = APP_DIR / "presets"
 OUTPUT_DIR = APP_DIR / "output"
+VOICEOVER_DIR = OUTPUT_DIR / "voiceovers"
 
 CANVAS_WIDTH = 1080
 CANVAS_HEIGHT = 1920
@@ -52,6 +53,22 @@ DEFAULT_FONT = r"C:\Windows\Fonts\arialbd.ttf"
 DEFAULT_CLAP_SOUND = ""
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv"}
 REPEAT_DISSOLVE_SECONDS = 0.5
+OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
+OPENAI_TTS_VOICES = [
+    "cedar",
+    "marin",
+    "coral",
+    "verse",
+    "alloy",
+    "ash",
+    "ballad",
+    "echo",
+    "fable",
+    "nova",
+    "onyx",
+    "sage",
+    "shimmer",
+]
 
 QUALITY_PRESETS = {
     "high": {"crf": "18", "preset": "slow", "label": "High quality (larger file)"},
@@ -156,12 +173,18 @@ class EditorSettings:
     openai_api_key: str = ""
     openai_model: str = "gpt-5.5"
     metadata_system_prompt: str = (
-        "You are a YouTube Shorts metadata expert. Return exactly four labeled sections: "
-        "Video Text:, Title:, Description:, Tags:. Video Text must be exactly two lines: "
-        "line 1 is the player's name, line 2 is a catchy 3-5 word phrase. Tags must be comma separated."
+        "You are a YouTube Shorts metadata expert. Return exactly five labeled sections: "
+        "Video Text:, Voiceover:, Title:, Description:, Tags:. Video Text must be exactly two lines: "
+        "line 1 is the player's name, line 2 is a catchy 3-5 word phrase. Voiceover must be exactly "
+        "one short energetic English sentence for the beginning of the video. Tags must be comma separated."
     )
     metadata_user_prompt: str = ""
     generated_video_text: str = ""
+    generated_voiceover: str = ""
+    voiceover_model: str = OPENAI_TTS_MODEL
+    voiceover_voice: str = "cedar"
+    voiceover_audio_path: str = ""
+    voiceover_enabled: bool = False
     generated_title: str = ""
     generated_description: str = ""
     generated_tags: str = ""
@@ -1004,6 +1027,41 @@ def build_end_sound_audio_filter(
     return f"{delayed}[a]"
 
 
+def build_audio_mix_filters(
+    base_audio_label: str | None,
+    external_tracks: list[tuple[int, str, int, float]],
+    output_duration: float,
+) -> tuple[list[str], str | None]:
+    if not external_tracks:
+        return [], None
+
+    filters: list[str] = []
+    mix_labels: list[str] = []
+    if base_audio_label:
+        mix_labels.append(f"[{base_audio_label}]")
+
+    for input_index, label, delay_ms, volume in external_tracks:
+        delay = f"adelay={delay_ms}|{delay_ms}," if delay_ms > 0 else ""
+        filters.append(f"[{input_index}:a]{delay}volume={volume:.2f}[{label}]")
+        mix_labels.append(f"[{label}]")
+
+    if len(mix_labels) == 1:
+        audio_chain = f"{mix_labels[0]}apad"
+    else:
+        duration_mode = "first" if base_audio_label else "longest"
+        audio_chain = (
+            "".join(mix_labels)
+            + f"amix=inputs={len(mix_labels)}:duration={duration_mode}:dropout_transition=0"
+        )
+        if not base_audio_label:
+            audio_chain += ",apad"
+
+    if not base_audio_label and output_duration > 0:
+        audio_chain += f",atrim=0:{format_ffmpeg_seconds(output_duration)}"
+    filters.append(f"{audio_chain}[a]")
+    return filters, "a"
+
+
 def build_text_xy(position: str, custom_x: int, custom_y: int) -> tuple[str, str]:
     if position == "top":
         return "(w-text_w)/2", str(custom_y)
@@ -1033,13 +1091,32 @@ def format_timeline_time(seconds: float) -> str:
     return f"{mins}:{secs:02d}"
 
 
+def ensure_voiceover_prompt(prompt: str) -> str:
+    prompt = (prompt or "").strip()
+    addition = (
+        " Also return Voiceover: exactly one short energetic English sentence for the beginning of the video."
+    )
+    if not prompt:
+        return default_settings().metadata_system_prompt
+    if "voiceover" in prompt.lower() or "voice over" in prompt.lower():
+        return prompt
+    return prompt + addition
+
+
 def parse_metadata_response(text: str) -> dict[str, str]:
-    result = {"video_text": "", "title": "", "description": "", "tags": ""}
-    pattern = re.compile(r"(?im)^\s*(video\s*top\s*text|video\s*text|top\s*text|overlay\s*text|title|description|tags)\s*:\s*")
+    result = {"video_text": "", "voiceover": "", "title": "", "description": "", "tags": ""}
+    pattern = re.compile(
+        r"(?im)^\s*(video\s*top\s*text|video\s*text|top\s*text|overlay\s*text|voice\s*over|voiceover|title|description|tags)\s*:\s*"
+    )
     matches = list(pattern.finditer(text or ""))
     for index, match in enumerate(matches):
         raw_key = re.sub(r"\s+", " ", match.group(1).lower()).strip()
-        key = "video_text" if raw_key in {"video text", "video top text", "top text", "overlay text"} else raw_key
+        if raw_key in {"video text", "video top text", "top text", "overlay text"}:
+            key = "video_text"
+        elif raw_key in {"voice over", "voiceover"}:
+            key = "voiceover"
+        else:
+            key = raw_key
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         result[key] = text[start:end].strip()
@@ -1051,6 +1128,11 @@ def parse_metadata_response(text: str) -> dict[str, str]:
         if part.strip()
     )
     return result
+
+
+def normalize_voiceover_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    return text
 
 
 def normalize_video_text(text: str) -> str:
@@ -1167,6 +1249,49 @@ def call_openai_metadata(api_key: str, model: str, system_prompt: str, user_prom
     return "\n".join(chunks).strip()
 
 
+def call_openai_tts(
+    api_key: str,
+    text: str,
+    output_path: Path,
+    *,
+    voice: str = "cedar",
+    model: str = OPENAI_TTS_MODEL,
+) -> Path:
+    text = normalize_voiceover_text(text)
+    if not text:
+        raise ValueError("Voiceover text is empty.")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    voice = voice if voice in OPENAI_TTS_VOICES else "cedar"
+    payload = {
+        "model": model or OPENAI_TTS_MODEL,
+        "voice": voice,
+        "input": text[:4096],
+        "instructions": (
+            "Speak like an energetic YouTube Shorts sports narrator. "
+            "Keep it punchy, excited, dramatic, and clear."
+        ),
+        "response_format": "mp3",
+    }
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/audio/speech",
+        data=data,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            audio = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(detail or str(exc)) from exc
+    output_path.write_bytes(audio)
+    return output_path
+
+
 TIMELINE_THUMB_WIDTH = 14
 TIMELINE_THUMB_HEIGHT = 18
 TEXT_RESIZE_HANDLE = 28
@@ -1206,6 +1331,8 @@ class FFmpegBuilder:
             raise ValueError("Output file name cannot be empty.")
         if s.end_sound_enabled and (not s.end_sound_path or not Path(s.end_sound_path).is_file()):
             raise ValueError("End sound effect is enabled, but the sound file was not found.")
+        if s.voiceover_enabled and (not s.voiceover_audio_path or not Path(s.voiceover_audio_path).is_file()):
+            raise ValueError("Voiceover is enabled, but the generated speech file was not found.")
 
     def build_command(self) -> list[str]:
         self.validate()
@@ -1245,15 +1372,30 @@ class FFmpegBuilder:
             "-i",
             s.video_path,
         ]
+        use_voiceover = s.voiceover_enabled and bool(s.voiceover_audio_path) and Path(s.voiceover_audio_path).is_file()
         use_end_sound = s.end_sound_enabled and bool(s.end_sound_path) and Path(s.end_sound_path).is_file()
         use_repeat = bool(s.repeat_clip_twice)
-        source_duration = get_video_duration(s.video_path) if (use_repeat or use_end_sound) else 0.0
+        source_duration = get_video_duration(s.video_path) if (use_repeat or use_end_sound or use_voiceover) else 0.0
         output_duration = repeat_clip_output_duration(s, source_duration) if use_repeat else source_duration
+        next_input_index = 1
+        voiceover_input_index = -1
+        if use_voiceover:
+            voiceover_input_index = next_input_index
+            next_input_index += 1
+            cmd.extend(["-i", s.voiceover_audio_path])
         audio_delay_ms = 0
+        end_sound_input_index = -1
         if use_end_sound:
             start_at = max(0.0, output_duration - max(0.0, float(s.end_sound_start_before_end)))
             audio_delay_ms = int(start_at * 1000)
+            end_sound_input_index = next_input_index
+            next_input_index += 1
             cmd.extend(["-i", s.end_sound_path])
+        external_audio_tracks: list[tuple[int, str, int, float]] = []
+        if use_voiceover:
+            external_audio_tracks.append((voiceover_input_index, "voiceover", 0, 1.0))
+        if use_end_sound:
+            external_audio_tracks.append((end_sound_input_index, "clap", audio_delay_ms, 1.30))
 
         if use_repeat:
             include_audio = video_has_audio_stream(s.video_path, ffmpeg)
@@ -1274,30 +1416,50 @@ class FFmpegBuilder:
                         input_label=source_video_label,
                     )
                 )
-            if use_end_sound:
-                filter_parts.append(
-                    build_end_sound_audio_filter(
-                        1,
-                        audio_delay_ms,
-                        base_audio_label=source_audio_label,
-                        output_duration=output_duration,
-                    )
-                )
+            audio_filter_parts, audio_label = build_audio_mix_filters(
+                source_audio_label,
+                external_audio_tracks,
+                output_duration,
+            )
+            filter_parts.extend(audio_filter_parts)
             cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", "[v]"])
-            if use_end_sound:
-                cmd.extend(["-map", "[a]"])
+            if audio_label:
+                cmd.extend(["-map", f"[{audio_label}]"])
             elif source_audio_label:
                 cmd.extend(["-map", f"[{source_audio_label}]"])
         elif s.crop_mode:
-            if use_end_sound:
-                audio_graph = build_end_sound_audio_filter(1, audio_delay_ms, base_audio_label="0:a")
-                cmd.extend(["-vf", vf, "-filter_complex", audio_graph, "-map", "0:v", "-map", "[a]"])
+            if external_audio_tracks:
+                base_audio_label = "0:a" if video_has_audio_stream(s.video_path, ffmpeg) else None
+                audio_filter_parts, audio_label = build_audio_mix_filters(
+                    base_audio_label,
+                    external_audio_tracks,
+                    output_duration,
+                )
+                cmd.extend(
+                    [
+                        "-vf",
+                        vf,
+                        "-filter_complex",
+                        ";".join(audio_filter_parts),
+                        "-map",
+                        "0:v",
+                        "-map",
+                        f"[{audio_label}]",
+                    ]
+                )
             else:
                 cmd.extend(["-vf", vf, "-map", "0:v", "-map", "0:a?"])
         else:
             filtergraph = build_free_video_filtergraph(layout, bg, overlay_filters)
-            if use_end_sound:
-                filtergraph += ";" + build_end_sound_audio_filter(1, audio_delay_ms, base_audio_label="0:a")
+            audio_label = None
+            if external_audio_tracks:
+                base_audio_label = "0:a" if video_has_audio_stream(s.video_path, ffmpeg) else None
+                audio_filter_parts, audio_label = build_audio_mix_filters(
+                    base_audio_label,
+                    external_audio_tracks,
+                    output_duration,
+                )
+                filtergraph += ";" + ";".join(audio_filter_parts)
             cmd.extend(
                 [
                     "-filter_complex",
@@ -1305,7 +1467,7 @@ class FFmpegBuilder:
                     "-map",
                     "[v]",
                     "-map",
-                    "[a]" if use_end_sound else "0:a?",
+                    f"[{audio_label}]" if audio_label else "0:a?",
                 ]
             )
         cmd.extend(
@@ -2034,7 +2196,7 @@ class VideoEditorApp:
         right = ttk.Frame(parent)
         right.grid(row=0, column=1, sticky=tk.NSEW)
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(2, weight=1)
+        right.rowconfigure(3, weight=1)
 
         video_text_box = ttk.LabelFrame(right, text="  Video Top Text  ", padding=10, style="Card.TLabelframe")
         video_text_box.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
@@ -2044,18 +2206,66 @@ class VideoEditorApp:
         self.generated_video_text_text.grid(row=0, column=0, sticky=tk.NSEW, pady=2)
         ttk.Button(video_text_box, text="Update", command=self.apply_generated_video_text).grid(row=0, column=1, padx=(8, 0), sticky=tk.NSEW)
 
+        voiceover_box = ttk.LabelFrame(right, text="  Voiceover  ", padding=10, style="Card.TLabelframe")
+        voiceover_box.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
+        voiceover_box.columnconfigure(0, weight=1)
+        self.ai_voiceover_var = tk.StringVar()
+        self.voiceover_voice_var = tk.StringVar(value="cedar")
+        self.voiceover_audio_path_var = tk.StringVar()
+        self.voiceover_enabled_var = tk.BooleanVar(value=False)
+        self.voiceover_status_var = tk.StringVar(value="No speech generated yet.")
+        ttk.Entry(voiceover_box, textvariable=self.ai_voiceover_var).grid(
+            row=0,
+            column=0,
+            columnspan=4,
+            sticky=tk.EW,
+            ipady=4,
+            pady=(0, 8),
+        )
+        ttk.Combobox(
+            voiceover_box,
+            textvariable=self.voiceover_voice_var,
+            values=OPENAI_TTS_VOICES,
+            state="readonly",
+            width=10,
+        ).grid(row=1, column=0, sticky=tk.W)
+        self.generate_voiceover_btn = ttk.Button(
+            voiceover_box,
+            text="Generate Speech",
+            command=self.generate_voiceover_speech,
+        )
+        self.generate_voiceover_btn.grid(row=1, column=1, padx=(8, 0), sticky=tk.EW)
+        self.play_voiceover_btn = ttk.Button(
+            voiceover_box,
+            text="Listen",
+            command=self.play_voiceover_speech,
+        )
+        self.play_voiceover_btn.grid(row=1, column=2, padx=(8, 0), sticky=tk.EW)
+        self.add_voiceover_btn = ttk.Button(
+            voiceover_box,
+            text="Add in Video",
+            command=self.add_voiceover_to_video,
+            style="Accent.TButton",
+        )
+        self.add_voiceover_btn.grid(row=1, column=3, padx=(8, 0), sticky=tk.EW)
+        ttk.Label(
+            voiceover_box,
+            textvariable=self.voiceover_status_var,
+            style="CardMuted.TLabel",
+        ).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(6, 0))
+
         title_box = ttk.LabelFrame(right, text="  Title  ", padding=10, style="Card.TLabelframe")
-        title_box.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
+        title_box.grid(row=2, column=0, sticky=tk.EW, pady=(0, 10))
         self.ai_title_var = tk.StringVar()
         ttk.Entry(title_box, textvariable=self.ai_title_var).pack(fill=tk.X, ipady=4)
 
         desc_box = ttk.LabelFrame(right, text="  Description  ", padding=10, style="Card.TLabelframe")
-        desc_box.grid(row=2, column=0, sticky=tk.NSEW, pady=(0, 10))
+        desc_box.grid(row=3, column=0, sticky=tk.NSEW, pady=(0, 10))
         self.ai_description_text = self._create_auto_text(desc_box, height=14)
         self.ai_description_text.pack(fill=tk.BOTH, expand=True)
 
         tags_box = ttk.LabelFrame(right, text="  Tags  ", padding=10, style="Card.TLabelframe")
-        tags_box.grid(row=3, column=0, sticky=tk.EW)
+        tags_box.grid(row=4, column=0, sticky=tk.EW)
         self.ai_tags_var = tk.StringVar()
         ttk.Entry(tags_box, textvariable=self.ai_tags_var).pack(fill=tk.X, ipady=4)
 
@@ -2696,6 +2906,7 @@ class VideoEditorApp:
         self.generated_video_text_text.delete("1.0", tk.END)
         self.generated_video_text_text.insert("1.0", normalize_video_text(parsed.get("video_text", "")))
         self.generated_video_text_text.event_generate("<KeyRelease>")
+        self.ai_voiceover_var.set(normalize_voiceover_text(parsed.get("voiceover", "")))
         self.ai_title_var.set(parsed.get("title", "").strip())
         self.ai_description_text.delete("1.0", tk.END)
         self.ai_description_text.insert("1.0", parsed.get("description", "").strip())
@@ -2708,6 +2919,88 @@ class VideoEditorApp:
         self.generate_metadata_btn.configure(state=tk.NORMAL)
         self.set_status(f"GPT generation failed: {message}", error=True)
         messagebox.showerror("GPT Error", message[:2000])
+
+    def generate_voiceover_speech(self) -> None:
+        if not self.openai_api_key_var.get().strip():
+            messagebox.showerror("GPT Setup", "Set your OpenAI API key first.")
+            return
+        voiceover_text = normalize_voiceover_text(self.ai_voiceover_var.get())
+        if not voiceover_text:
+            messagebox.showinfo("Voiceover", "Generate or type a one-line voiceover first.")
+            return
+        self._save_current_editor_state()
+        self.generate_voiceover_btn.configure(state=tk.DISABLED)
+        self.voiceover_status_var.set("Generating speech...")
+        self.set_status("Generating voiceover speech with OpenAI TTS...")
+        threading.Thread(target=self._run_voiceover_generation, args=(voiceover_text,), daemon=True).start()
+
+    def _run_voiceover_generation(self, voiceover_text: str) -> None:
+        try:
+            safe_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            output_path = VOICEOVER_DIR / f"voiceover-{safe_stamp}.mp3"
+            result_path = call_openai_tts(
+                self.openai_api_key_var.get().strip(),
+                voiceover_text,
+                output_path,
+                voice=self.voiceover_voice_var.get().strip() or "cedar",
+                model=OPENAI_TTS_MODEL,
+            )
+            self.root.after(0, lambda: self._voiceover_generation_success(result_path))
+        except Exception as exc:
+            self.root.after(0, lambda: self._voiceover_generation_failed(str(exc)))
+
+    def _voiceover_generation_success(self, path: Path) -> None:
+        self.generate_voiceover_btn.configure(state=tk.NORMAL)
+        self.voiceover_audio_path_var.set(str(path))
+        self.voiceover_enabled_var.set(False)
+        self.voiceover_status_var.set(f"Speech ready: {path.name}")
+        self._save_current_editor_state()
+        self.set_status("Voiceover speech generated. Listen or add it to the export.")
+
+    def _voiceover_generation_failed(self, message: str) -> None:
+        self.generate_voiceover_btn.configure(state=tk.NORMAL)
+        self.voiceover_status_var.set("Speech generation failed.")
+        self.set_status(f"Voiceover failed: {message}", error=True)
+        messagebox.showerror("Voiceover Error", message[:2000])
+
+    def _update_voiceover_status(self) -> None:
+        if not hasattr(self, "voiceover_status_var"):
+            return
+        path = Path(self.voiceover_audio_path_var.get().strip())
+        if path.is_file() and bool(self.voiceover_enabled_var.get()):
+            self.voiceover_status_var.set(f"Added at video start: {path.name}")
+        elif path.is_file():
+            self.voiceover_status_var.set(f"Speech ready: {path.name}")
+        elif self.voiceover_audio_path_var.get().strip():
+            self.voiceover_status_var.set("Saved speech file is missing. Generate speech again.")
+        else:
+            self.voiceover_status_var.set("No speech generated yet.")
+
+    def play_voiceover_speech(self) -> None:
+        path = Path(self.voiceover_audio_path_var.get().strip())
+        if not path.is_file():
+            messagebox.showinfo("Voiceover", "Generate speech first.")
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+            self.set_status(f"Playing voiceover preview: {path.name}")
+        except OSError as exc:
+            messagebox.showerror("Voiceover", f"Could not play voiceover:\n{exc}")
+
+    def add_voiceover_to_video(self) -> None:
+        path = Path(self.voiceover_audio_path_var.get().strip())
+        if not path.is_file():
+            messagebox.showinfo("Voiceover", "Generate speech first, then add it to the video.")
+            return
+        self.voiceover_enabled_var.set(True)
+        self.voiceover_status_var.set(f"Added at video start: {path.name}")
+        self._save_current_editor_state()
+        self.set_status("Voiceover will be mixed in at the beginning of the export.")
 
     def apply_generated_video_text(self) -> None:
         text = normalize_video_text(self.generated_video_text_text.get("1.0", "end-1c"))
@@ -4007,6 +4300,9 @@ class VideoEditorApp:
             self.clip2_trim_start_var,
             self.clip2_trim_end_var,
             self.openai_model_var,
+            self.ai_voiceover_var,
+            self.voiceover_voice_var,
+            self.voiceover_audio_path_var,
             self.ai_title_var,
             self.ai_tags_var,
         ]
@@ -4017,6 +4313,7 @@ class VideoEditorApp:
             self.video_center_align_var,
             self.end_sound_enabled_var,
             self.repeat_clip_twice_var,
+            self.voiceover_enabled_var,
             self.text_box_var,
             self.text_shadow_var,
             self.text_outline_var,
@@ -4077,6 +4374,7 @@ class VideoEditorApp:
         self._update_trim_summary()
         self.openai_api_key_var.set(s.openai_api_key)
         self.openai_model_var.set(s.openai_model)
+        s.metadata_system_prompt = ensure_voiceover_prompt(s.metadata_system_prompt)
         self.metadata_system_prompt_text.delete("1.0", tk.END)
         self.metadata_system_prompt_text.insert("1.0", s.metadata_system_prompt)
         self.metadata_user_prompt_text.delete("1.0", tk.END)
@@ -4084,6 +4382,11 @@ class VideoEditorApp:
         self.generated_video_text_text.delete("1.0", tk.END)
         self.generated_video_text_text.insert("1.0", s.generated_video_text)
         self.generated_video_text_text.event_generate("<KeyRelease>")
+        self.ai_voiceover_var.set(s.generated_voiceover)
+        self.voiceover_voice_var.set(s.voiceover_voice if s.voiceover_voice in OPENAI_TTS_VOICES else "cedar")
+        self.voiceover_audio_path_var.set(s.voiceover_audio_path)
+        self.voiceover_enabled_var.set(s.voiceover_enabled)
+        self._update_voiceover_status()
         self.ai_title_var.set(s.generated_title)
         self.ai_description_text.delete("1.0", tk.END)
         self.ai_description_text.insert("1.0", s.generated_description)
@@ -4170,9 +4473,14 @@ class VideoEditorApp:
             clip2_trim_end=parse_float(self.clip2_trim_end_var.get(), 0.0),
             openai_api_key=self.openai_api_key_var.get().strip(),
             openai_model=self.openai_model_var.get().strip() or "gpt-5.5",
-            metadata_system_prompt=self.metadata_system_prompt_text.get("1.0", "end-1c").strip(),
+            metadata_system_prompt=ensure_voiceover_prompt(self.metadata_system_prompt_text.get("1.0", "end-1c")),
             metadata_user_prompt=self.metadata_user_prompt_text.get("1.0", "end-1c").strip(),
             generated_video_text=normalize_video_text(self.generated_video_text_text.get("1.0", "end-1c")),
+            generated_voiceover=normalize_voiceover_text(self.ai_voiceover_var.get()),
+            voiceover_model=OPENAI_TTS_MODEL,
+            voiceover_voice=self.voiceover_voice_var.get().strip() or "cedar",
+            voiceover_audio_path=self.voiceover_audio_path_var.get().strip(),
+            voiceover_enabled=bool(self.voiceover_enabled_var.get()),
             generated_title=self.ai_title_var.get().strip(),
             generated_description=self.ai_description_text.get("1.0", "end-1c").strip(),
             generated_tags=self.ai_tags_var.get().strip(),

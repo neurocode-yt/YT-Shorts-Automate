@@ -13,6 +13,8 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, scrolledtext, ttk
@@ -133,6 +135,16 @@ class EditorSettings:
     end_sound_enabled: bool = False
     end_sound_path: str = DEFAULT_CLAP_SOUND
     end_sound_start_before_end: float = 5.0
+    openai_api_key: str = ""
+    openai_model: str = "gpt-5.5"
+    metadata_system_prompt: str = (
+        "You are a YouTube Shorts metadata expert. Return exactly three labeled sections: "
+        "Title:, Description:, Tags:. Tags must be comma separated."
+    )
+    metadata_user_prompt: str = ""
+    generated_title: str = ""
+    generated_description: str = ""
+    generated_tags: str = ""
     last_preset: str = ""
 
     def __post_init__(self) -> None:
@@ -822,6 +834,78 @@ def format_timeline_time(seconds: float) -> str:
     total = int(seconds)
     mins, secs = divmod(total, 60)
     return f"{mins}:{secs:02d}"
+
+
+def parse_metadata_response(text: str) -> dict[str, str]:
+    result = {"title": "", "description": "", "tags": ""}
+    pattern = re.compile(r"(?im)^\s*(title|description|tags)\s*:\s*")
+    matches = list(pattern.finditer(text or ""))
+    for index, match in enumerate(matches):
+        key = match.group(1).lower()
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        result[key] = text[start:end].strip()
+    if not any(result.values()):
+        result["description"] = (text or "").strip()
+    result["tags"] = ", ".join(
+        part.strip().lstrip("#")
+        for part in re.split(r"[,\n]+", result["tags"])
+        if part.strip()
+    )
+    return result
+
+
+def call_openai_metadata(api_key: str, model: str, system_prompt: str, user_prompt: str) -> str:
+    if not user_prompt:
+        user_prompt = "Generate YouTube Shorts metadata for the currently edited short video."
+    payload = {
+        "model": model,
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": system_prompt,
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": user_prompt,
+                    }
+                ],
+            },
+        ],
+    }
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=data,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(detail or str(exc)) from exc
+    payload = json.loads(body)
+    if payload.get("output_text"):
+        return payload["output_text"]
+    chunks: list[str] = []
+    for item in payload.get("output", []):
+        for content in item.get("content", []):
+            if content.get("type") in {"output_text", "text"} and content.get("text"):
+                chunks.append(content["text"])
+    return "\n".join(chunks).strip()
 
 
 TIMELINE_THUMB_WIDTH = 14
@@ -1597,59 +1681,61 @@ class VideoEditorApp:
 
     def _build_description_section(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(1, weight=1)
+        parent.columnconfigure(1, weight=2)
+        parent.rowconfigure(0, weight=1)
 
-        top = ttk.Frame(parent)
-        top.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
-        top.columnconfigure(0, weight=1)
+        left = ttk.Frame(parent)
+        left.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 10))
+        left.columnconfigure(0, weight=1)
 
-        title_box = ttk.LabelFrame(top, text="  Title  ", padding=10, style="Card.TLabelframe")
-        title_box.grid(row=0, column=0, sticky=tk.EW)
+        api_box = ttk.LabelFrame(left, text="  GPT Setup  ", padding=10, style="Card.TLabelframe")
+        api_box.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
+        api_box.columnconfigure(1, weight=1)
+        self.openai_model_var = tk.StringVar(value="gpt-5.5")
+        self.openai_api_key_var = tk.StringVar()
+        ttk.Button(api_box, text="Set API Key", command=self.set_openai_api_key).grid(row=0, column=0, sticky=tk.W)
+        ttk.Combobox(
+            api_box,
+            textvariable=self.openai_model_var,
+            values=["gpt-5.5", "gpt-5.4", "gpt-4.1", "gpt-4o", "gpt-4o-mini"],
+            state="readonly",
+        ).grid(row=0, column=1, sticky=tk.EW, padx=(8, 0))
+
+        prompt_box = ttk.LabelFrame(left, text="  Prompts  ", padding=10, style="Card.TLabelframe")
+        prompt_box.grid(row=1, column=0, sticky=tk.EW)
+        prompt_box.columnconfigure(0, weight=1)
+        ttk.Label(prompt_box, text="System Prompt", style="CardMuted.TLabel").grid(row=0, column=0, sticky=tk.W)
+        self.metadata_system_prompt_text = self._create_auto_text(prompt_box, height=5)
+        self.metadata_system_prompt_text.grid(row=1, column=0, sticky=tk.EW, pady=(4, 10))
+        ttk.Label(prompt_box, text="User Prompt", style="CardMuted.TLabel").grid(row=2, column=0, sticky=tk.W)
+        self.metadata_user_prompt_text = self._create_auto_text(prompt_box, height=5)
+        self.metadata_user_prompt_text.grid(row=3, column=0, sticky=tk.EW, pady=(4, 0))
+
+        actions = ttk.Frame(left)
+        actions.grid(row=2, column=0, sticky=tk.EW, pady=(10, 0))
+        self.generate_metadata_btn = ttk.Button(actions, text="Generate Metadata", command=self.generate_metadata)
+        self.generate_metadata_btn.pack(side=tk.LEFT)
+        ttk.Button(actions, text="Save Metadata", command=self._save_current_editor_state).pack(side=tk.LEFT, padx=(8, 0))
+
+        right = ttk.Frame(parent)
+        right.grid(row=0, column=1, sticky=tk.NSEW)
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+
+        title_box = ttk.LabelFrame(right, text="  Title  ", padding=10, style="Card.TLabelframe")
+        title_box.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
         self.ai_title_var = tk.StringVar()
         ttk.Entry(title_box, textvariable=self.ai_title_var).pack(fill=tk.X, ipady=4)
 
-        content = ttk.Frame(parent)
-        content.grid(row=1, column=0, sticky=tk.NSEW)
-        content.columnconfigure(0, weight=2)
-        content.columnconfigure(1, weight=1)
-        content.rowconfigure(0, weight=1)
-
-        desc_box = ttk.LabelFrame(content, text="  Description  ", padding=10, style="Card.TLabelframe")
-        desc_box.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 8))
-        self.ai_description_text = scrolledtext.ScrolledText(
-            desc_box,
-            wrap=tk.WORD,
-            font=("Segoe UI", 11),
-            bg=THEME["surface2"],
-            fg=THEME["text"],
-            insertbackground=THEME["accent"],
-            relief=tk.SOLID,
-            bd=1,
-            padx=8,
-            pady=8,
-        )
+        desc_box = ttk.LabelFrame(right, text="  Description  ", padding=10, style="Card.TLabelframe")
+        desc_box.grid(row=1, column=0, sticky=tk.NSEW, pady=(0, 10))
+        self.ai_description_text = self._create_auto_text(desc_box, height=14)
         self.ai_description_text.pack(fill=tk.BOTH, expand=True)
 
-        tags_box = ttk.LabelFrame(content, text="  Tags  ", padding=10, style="Card.TLabelframe")
-        tags_box.grid(row=0, column=1, sticky=tk.NSEW)
-        self.ai_tags_text = scrolledtext.ScrolledText(
-            tags_box,
-            wrap=tk.WORD,
-            font=("Segoe UI", 11),
-            bg=THEME["surface2"],
-            fg=THEME["text"],
-            insertbackground=THEME["accent"],
-            relief=tk.SOLID,
-            bd=1,
-            padx=8,
-            pady=8,
-        )
-        self.ai_tags_text.pack(fill=tk.BOTH, expand=True)
-
-        actions = ttk.Frame(parent)
-        actions.grid(row=2, column=0, sticky=tk.EW, pady=(10, 0))
-        ttk.Button(actions, text="Generate Metadata").pack(side=tk.LEFT)
-        ttk.Button(actions, text="Save Metadata").pack(side=tk.LEFT, padx=(8, 0))
+        tags_box = ttk.LabelFrame(right, text="  Tags  ", padding=10, style="Card.TLabelframe")
+        tags_box.grid(row=2, column=0, sticky=tk.EW)
+        self.ai_tags_var = tk.StringVar()
+        ttk.Entry(tags_box, textvariable=self.ai_tags_var).pack(fill=tk.X, ipady=4)
 
     def _build_upload_section(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -1683,6 +1769,92 @@ class VideoEditorApp:
         actions.grid(row=2, column=0, sticky=tk.EW)
         ttk.Button(actions, text="Connect YouTube").pack(side=tk.LEFT)
         ttk.Button(actions, text="Upload / Schedule", style="Accent.TButton").pack(side=tk.LEFT, padx=(8, 0))
+
+    def _create_auto_text(self, parent: tk.Misc, *, height: int = 4) -> tk.Text:
+        widget = tk.Text(
+            parent,
+            height=height,
+            wrap=tk.WORD,
+            font=("Segoe UI", 11),
+            bg=THEME["surface2"],
+            fg=THEME["text"],
+            insertbackground=THEME["accent"],
+            relief=tk.SOLID,
+            bd=1,
+            padx=8,
+            pady=8,
+            highlightthickness=0,
+        )
+        widget._min_height = height
+
+        def resize(_event=None) -> None:
+            try:
+                line_count = int(widget.index("end-1c").split(".")[0])
+            except (tk.TclError, ValueError):
+                line_count = height
+            widget.configure(height=max(widget._min_height, min(18, line_count + 1)))
+            if not self._suspend_save:
+                self._save_current_editor_state()
+
+        widget.bind("<KeyRelease>", resize)
+        widget.bind("<<Paste>>", lambda _event: self.root.after(1, resize))
+        return widget
+
+    def set_openai_api_key(self) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("OpenAI API Key")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        key_var = tk.StringVar(value=self.openai_api_key_var.get())
+        ttk.Label(dialog, text="API key:").pack(anchor=tk.W, padx=12, pady=(12, 4))
+        entry = ttk.Entry(dialog, textvariable=key_var, width=58, show="*")
+        entry.pack(padx=12)
+        entry.focus_set()
+
+        def save_key() -> None:
+            self.openai_api_key_var.set(key_var.get().strip())
+            self._save_current_editor_state()
+            dialog.destroy()
+
+        ttk.Button(dialog, text="Save Key", command=save_key).pack(pady=12)
+
+    def generate_metadata(self) -> None:
+        if not self.openai_api_key_var.get().strip():
+            messagebox.showerror("GPT Setup", "Set your OpenAI API key first.")
+            return
+        self._save_current_editor_state()
+        self.generate_metadata_btn.configure(state=tk.DISABLED)
+        self.set_status("Generating title, description, and tags with GPT...")
+        threading.Thread(target=self._run_metadata_generation, daemon=True).start()
+
+    def _run_metadata_generation(self) -> None:
+        try:
+            result = call_openai_metadata(
+                api_key=self.openai_api_key_var.get().strip(),
+                model=self.openai_model_var.get().strip() or "gpt-5.5",
+                system_prompt=self.metadata_system_prompt_text.get("1.0", "end-1c").strip(),
+                user_prompt=self.metadata_user_prompt_text.get("1.0", "end-1c").strip(),
+            )
+            self.root.after(0, lambda: self._metadata_generation_success(result))
+        except Exception as exc:
+            self.root.after(0, lambda: self._metadata_generation_failed(str(exc)))
+
+    def _metadata_generation_success(self, raw_text: str) -> None:
+        parsed = parse_metadata_response(raw_text)
+        self.ai_title_var.set(parsed.get("title", "").strip())
+        self.ai_description_text.delete("1.0", tk.END)
+        self.ai_description_text.insert("1.0", parsed.get("description", "").strip())
+        self.ai_tags_var.set(parsed.get("tags", "").strip())
+        self.generate_metadata_btn.configure(state=tk.NORMAL)
+        self._save_current_editor_state()
+        self.set_status("Metadata generated.")
+
+    def _metadata_generation_failed(self, message: str) -> None:
+        self.generate_metadata_btn.configure(state=tk.NORMAL)
+        self.set_status(f"GPT generation failed: {message}", error=True)
+        messagebox.showerror("GPT Error", message[:2000])
 
     def _grid_field_box(
         self, parent: ttk.Frame, title: str, row: int, column: int, columnspan: int = 1
@@ -2484,6 +2656,9 @@ class VideoEditorApp:
             self.export_quality_var,
             self.end_sound_path_var,
             self.end_sound_start_var,
+            self.openai_model_var,
+            self.ai_title_var,
+            self.ai_tags_var,
         ]
         for var in tracked_vars:
             var.trace_add("write", lambda *_: self._on_settings_changed())
@@ -2543,6 +2718,16 @@ class VideoEditorApp:
         self.end_sound_enabled_var.set(s.end_sound_enabled)
         self.end_sound_path_var.set(s.end_sound_path)
         self.end_sound_start_var.set(str(s.end_sound_start_before_end))
+        self.openai_api_key_var.set(s.openai_api_key)
+        self.openai_model_var.set(s.openai_model)
+        self.metadata_system_prompt_text.delete("1.0", tk.END)
+        self.metadata_system_prompt_text.insert("1.0", s.metadata_system_prompt)
+        self.metadata_user_prompt_text.delete("1.0", tk.END)
+        self.metadata_user_prompt_text.insert("1.0", s.metadata_user_prompt)
+        self.ai_title_var.set(s.generated_title)
+        self.ai_description_text.delete("1.0", tk.END)
+        self.ai_description_text.insert("1.0", s.generated_description)
+        self.ai_tags_var.set(s.generated_tags)
         self._sync_zoom_slider(s.video_scale)
         self._suspend_zoom_sync = False
         self._suspend_overlay_switch = False
@@ -2610,6 +2795,13 @@ class VideoEditorApp:
             end_sound_enabled=bool(self.end_sound_enabled_var.get()),
             end_sound_path=self.end_sound_path_var.get().strip() or DEFAULT_CLAP_SOUND,
             end_sound_start_before_end=parse_float(self.end_sound_start_var.get(), 5.0),
+            openai_api_key=self.openai_api_key_var.get().strip(),
+            openai_model=self.openai_model_var.get().strip() or "gpt-5.5",
+            metadata_system_prompt=self.metadata_system_prompt_text.get("1.0", "end-1c").strip(),
+            metadata_user_prompt=self.metadata_user_prompt_text.get("1.0", "end-1c").strip(),
+            generated_title=self.ai_title_var.get().strip(),
+            generated_description=self.ai_description_text.get("1.0", "end-1c").strip(),
+            generated_tags=self.ai_tags_var.get().strip(),
             last_preset=self.settings.last_preset,
         )
 

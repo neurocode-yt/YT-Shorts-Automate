@@ -51,6 +51,7 @@ PREVIEW_DISPLAY_H = int(PREVIEW_DISPLAY_W * CANVAS_HEIGHT / CANVAS_WIDTH)
 DEFAULT_FONT = r"C:\Windows\Fonts\arialbd.ttf"
 DEFAULT_CLAP_SOUND = ""
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv"}
+REPEAT_DISSOLVE_SECONDS = 0.5
 
 QUALITY_PRESETS = {
     "high": {"crf": "18", "preset": "slow", "label": "High quality (larger file)"},
@@ -905,20 +906,38 @@ def build_trim_arg(start: float, end: float) -> str:
     return ":".join(parts)
 
 
+def repeat_clip_ranges(settings: EditorSettings, source_duration: float) -> tuple[tuple[float, float], tuple[float, float]]:
+    return (
+        normalize_clip_trim(
+            settings.clip1_trim_start,
+            settings.clip1_trim_end,
+            source_duration,
+        ),
+        normalize_clip_trim(
+            settings.clip2_trim_start,
+            settings.clip2_trim_end,
+            source_duration,
+        ),
+    )
+
+
+def repeat_dissolve_duration(settings: EditorSettings, source_duration: float) -> float:
+    if source_duration <= 0:
+        return 0.0
+    (c1_start, c1_end), (c2_start, c2_end) = repeat_clip_ranges(settings, source_duration)
+    clip1_len = max(0.0, c1_end - c1_start)
+    clip2_len = max(0.0, c2_end - c2_start)
+    transition = min(REPEAT_DISSOLVE_SECONDS, clip1_len - 0.001, clip2_len - 0.001)
+    return transition if transition >= 0.05 else 0.0
+
+
 def repeat_clip_output_duration(settings: EditorSettings, source_duration: float) -> float:
     if source_duration <= 0:
         return 0.0
-    c1_start, c1_end = normalize_clip_trim(
-        settings.clip1_trim_start,
-        settings.clip1_trim_end,
-        source_duration,
-    )
-    c2_start, c2_end = normalize_clip_trim(
-        settings.clip2_trim_start,
-        settings.clip2_trim_end,
-        source_duration,
-    )
-    return max(0.0, c1_end - c1_start) + max(0.0, c2_end - c2_start)
+    (c1_start, c1_end), (c2_start, c2_end) = repeat_clip_ranges(settings, source_duration)
+    clip1_len = max(0.0, c1_end - c1_start)
+    clip2_len = max(0.0, c2_end - c2_start)
+    return max(0.0, clip1_len + clip2_len - repeat_dissolve_duration(settings, source_duration))
 
 
 def build_repeat_clip_filtergraph_prefix(
@@ -926,23 +945,34 @@ def build_repeat_clip_filtergraph_prefix(
     source_duration: float,
     include_audio: bool,
 ) -> tuple[list[str], str, str | None]:
-    c1_start, c1_end = normalize_clip_trim(
-        settings.clip1_trim_start,
-        settings.clip1_trim_end,
-        source_duration,
-    )
-    c2_start, c2_end = normalize_clip_trim(
-        settings.clip2_trim_start,
-        settings.clip2_trim_end,
-        source_duration,
-    )
+    (c1_start, c1_end), (c2_start, c2_end) = repeat_clip_ranges(settings, source_duration)
     c1 = build_trim_arg(c1_start, c1_end)
     c2 = build_trim_arg(c2_start, c2_end)
+    transition = repeat_dissolve_duration(settings, source_duration)
+    clip1_len = max(0.0, c1_end - c1_start)
 
     parts = [
         f"[0:v]trim={c1},setpts=PTS-STARTPTS[segv1]",
         f"[0:v]trim={c2},setpts=PTS-STARTPTS[segv2]",
     ]
+    if transition > 0.0:
+        offset = max(0.0, clip1_len - transition)
+        parts.append(
+            "[segv1][segv2]"
+            f"xfade=transition=dissolve:duration={format_ffmpeg_seconds(transition)}:"
+            f"offset={format_ffmpeg_seconds(offset)}[repeatv]"
+        )
+        if include_audio:
+            parts.extend(
+                [
+                    f"[0:a]atrim={c1},asetpts=PTS-STARTPTS[sega1]",
+                    f"[0:a]atrim={c2},asetpts=PTS-STARTPTS[sega2]",
+                    f"[sega1][sega2]acrossfade=d={format_ffmpeg_seconds(transition)}[repeata]",
+                ]
+            )
+            return parts, "repeatv", "repeata"
+        return parts, "repeatv", None
+
     if include_audio:
         parts.extend(
             [
@@ -1556,6 +1586,8 @@ class VideoEditorApp:
         self._play_after_id: str | None = None
         self._play_started_at = 0.0
         self._play_start_frame_idx = 0
+        self._play_start_sequence_time = 0.0
+        self._sequence_current_time = 0.0
         self._scrubbing = False
         self._compose_layout: ComposeResult | None = None
         self._drag_target: str | None = None
@@ -2837,13 +2869,52 @@ class VideoEditorApp:
             row["start_preview"].configure(image=start_photo)
             row["end_preview"].configure(image=end_photo)
 
-        def jump_to_time(seconds: float) -> None:
+        def dialog_transition_duration() -> float:
+            if len(trim_rows) < 2:
+                return 0.0
+            clip1_len = max(0.0, float(trim_rows[0]["end"]) - float(trim_rows[0]["start"]))
+            clip2_len = max(0.0, float(trim_rows[1]["end"]) - float(trim_rows[1]["start"]))
+            transition = min(REPEAT_DISSOLVE_SECONDS, clip1_len - 0.001, clip2_len - 0.001)
+            return transition if transition >= 0.05 else 0.0
+
+        def apply_dialog_trim_to_vars() -> None:
+            values = []
+            for row in trim_rows:
+                start = float(row["start"])
+                end = float(row["end"])
+                saved_end = 0.0 if abs(end - duration) <= 0.01 else end
+                values.extend([start, saved_end])
+
+            self.clip1_trim_start_var.set(format_ffmpeg_seconds(values[0]))
+            self.clip1_trim_end_var.set(format_ffmpeg_seconds(values[1]))
+            self.clip2_trim_start_var.set(format_ffmpeg_seconds(values[2]))
+            self.clip2_trim_end_var.set(format_ffmpeg_seconds(values[3]))
+            self.repeat_clip_twice_var.set(True)
+            self._update_trim_summary()
+            self._save_current_editor_state()
+
+        def sequence_time_for_row(row: dict[str, object], edge: str) -> float:
+            if len(trim_rows) < 2:
+                return 0.0
+            clip1_len = max(0.0, float(trim_rows[0]["end"]) - float(trim_rows[0]["start"]))
+            clip2_len = max(0.0, float(trim_rows[1]["end"]) - float(trim_rows[1]["start"]))
+            transition = dialog_transition_duration()
+            if int(row["clip_index"]) == 1:
+                return 0.0 if edge == "start" else clip1_len
+            second_clip_at = max(0.0, clip1_len - transition)
+            return second_clip_at if edge == "start" else second_clip_at + clip2_len
+
+        def jump_to_sequence_time(row: dict[str, object], edge: str) -> None:
             if not self.preview_engine.is_loaded() or duration <= 0:
                 return
-            target = clamp(seconds, 0.0, duration)
+            apply_dialog_trim_to_vars()
+            total = self._effective_timeline_duration()
+            if total <= 0:
+                return
+            target = clamp(sequence_time_for_row(row, edge), 0.0, total)
             self.stop_playback()
-            self._seek_to_fraction(target / duration)
-            self.set_status(f"Timeline moved to {format_time(target)} from trim preview.")
+            self._seek_to_fraction(target / total)
+            self.set_status(f"Timeline moved to {format_time(target)} in the repeated sequence.")
 
         def row_width(row: dict[str, object]) -> int:
             return max(520, int(row["canvas"].winfo_width()))
@@ -2867,7 +2938,10 @@ class VideoEditorApp:
                 row["start_var"].set(f"Start {seconds_label(start)}")
                 row["end_var"].set(f"End {seconds_label(end)}")
                 row["length_var"].set(f"Length {seconds_label(end - start)}")
-            total_var.set(f"Repeated output length: {seconds_label(total)}")
+            transition = dialog_transition_duration()
+            total = max(0.0, total - transition)
+            transition_text = f" | dissolve {seconds_label(transition)}" if transition > 0 else ""
+            total_var.set(f"Repeated output length: {seconds_label(total)}{transition_text}")
 
         def draw_row(row: dict[str, object]) -> None:
             canvas: tk.Canvas = row["canvas"]
@@ -2997,6 +3071,7 @@ class VideoEditorApp:
             title: str,
             start_var: tk.StringVar,
             end_var: tk.StringVar,
+            clip_index: int,
         ) -> dict[str, object]:
             start, end = read_range(start_var, end_var)
             box = ttk.LabelFrame(content, text=f"  {title}  ", padding=10, style="Card.TLabelframe")
@@ -3013,6 +3088,7 @@ class VideoEditorApp:
             ttk.Label(labels, textvariable=end_label_var, style="Card.TLabel", width=14).grid(row=0, column=1, sticky=tk.W, padx=(8, 0))
             ttk.Label(labels, textvariable=length_label_var, style="CardMuted.TLabel", width=16).grid(row=0, column=2, sticky=tk.W, padx=(8, 0))
             row: dict[str, object] = {
+                "clip_index": clip_index,
                 "start": start,
                 "end": end,
                 "start_var": start_label_var,
@@ -3061,12 +3137,12 @@ class VideoEditorApp:
             ttk.Button(
                 start_preview_box,
                 text="Go Start",
-                command=lambda r=row: jump_to_time(float(r["start"])),
+                command=lambda r=row: jump_to_sequence_time(r, "start"),
             ).pack(fill=tk.X, pady=(6, 0))
             ttk.Button(
                 end_preview_box,
                 text="Go End",
-                command=lambda r=row: jump_to_time(float(r["end"])),
+                command=lambda r=row: jump_to_sequence_time(r, "end"),
             ).pack(fill=tk.X, pady=(6, 0))
             row["start_preview"] = start_preview
             row["end_preview"] = end_preview
@@ -3077,8 +3153,8 @@ class VideoEditorApp:
             canvas.bind("<Motion>", lambda event, r=row: on_motion(r, event))
             return row
 
-        trim_rows.append(add_trim_row(1, "Clip 1", self.clip1_trim_start_var, self.clip1_trim_end_var))
-        trim_rows.append(add_trim_row(2, "Clip 2", self.clip2_trim_start_var, self.clip2_trim_end_var))
+        trim_rows.append(add_trim_row(1, "Clip 1", self.clip1_trim_start_var, self.clip1_trim_end_var, 1))
+        trim_rows.append(add_trim_row(2, "Clip 2", self.clip2_trim_start_var, self.clip2_trim_end_var, 2))
 
         footer = ttk.Frame(content)
         footer.grid(row=3, column=0, sticky=tk.EW, pady=(12, 0))
@@ -3089,20 +3165,7 @@ class VideoEditorApp:
         actions.grid(row=0, column=1, sticky=tk.E)
 
         def save_trim() -> None:
-            values = []
-            for row in trim_rows:
-                start = float(row["start"])
-                end = float(row["end"])
-                saved_end = 0.0 if abs(end - duration) <= 0.01 else end
-                values.extend([start, saved_end])
-
-            self.clip1_trim_start_var.set(format_ffmpeg_seconds(values[0]))
-            self.clip1_trim_end_var.set(format_ffmpeg_seconds(values[1]))
-            self.clip2_trim_start_var.set(format_ffmpeg_seconds(values[2]))
-            self.clip2_trim_end_var.set(format_ffmpeg_seconds(values[3]))
-            self.repeat_clip_twice_var.set(True)
-            self._update_trim_summary()
-            self._save_current_editor_state()
+            apply_dialog_trim_to_vars()
             close_dialog()
 
         def reset_all() -> None:
@@ -4171,7 +4234,7 @@ class VideoEditorApp:
             self._draw_preview_placeholder()
             return
         if frame is None:
-            frame = self.preview_engine.seek(self.preview_engine.current_frame_idx)
+            frame = self._frame_for_sequence_time(self._sequence_current_time)
         if frame is None:
             return
         settings = self._collect_settings_from_ui()
@@ -4405,9 +4468,80 @@ class VideoEditorApp:
         self._update_preview_summary()
         self._render_preview()
 
+    def _timing_settings_from_ui(self) -> EditorSettings:
+        def parse_float(value: str, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        settings = EditorSettings(**asdict(self.settings))
+        if hasattr(self, "repeat_clip_twice_var"):
+            settings.repeat_clip_twice = bool(self.repeat_clip_twice_var.get())
+            settings.clip1_trim_start = parse_float(self.clip1_trim_start_var.get(), 0.0)
+            settings.clip1_trim_end = parse_float(self.clip1_trim_end_var.get(), 0.0)
+            settings.clip2_trim_start = parse_float(self.clip2_trim_start_var.get(), 0.0)
+            settings.clip2_trim_end = parse_float(self.clip2_trim_end_var.get(), 0.0)
+        return settings
+
+    def _effective_timeline_duration(self, settings: EditorSettings | None = None) -> float:
+        source_duration = self.preview_engine.duration_sec
+        if source_duration <= 0:
+            return 0.0
+        settings = settings or self._timing_settings_from_ui()
+        if settings.repeat_clip_twice:
+            return repeat_clip_output_duration(settings, source_duration) or source_duration
+        return source_duration
+
+    def _read_source_frame_at_time(self, seconds: float) -> np.ndarray | None:
+        if not self.preview_engine.is_loaded() or self.preview_engine.frame_count <= 0:
+            return None
+        source_duration = max(0.0, self.preview_engine.duration_sec)
+        fps = max(1.0, self.preview_engine.fps)
+        max_time = max(0.0, source_duration - (1.0 / fps))
+        source_time = max(0.0, min(seconds, max_time))
+        frame_idx = int(round(source_time * fps))
+        frame_idx = max(0, min(frame_idx, self.preview_engine.frame_count - 1))
+        return self.preview_engine.seek(frame_idx)
+
+    def _frame_for_sequence_time(self, sequence_time: float) -> np.ndarray | None:
+        source_duration = self.preview_engine.duration_sec
+        if source_duration <= 0:
+            self._sequence_current_time = 0.0
+            return None
+
+        settings = self._timing_settings_from_ui()
+        total_duration = self._effective_timeline_duration(settings)
+        sequence_time = max(0.0, min(sequence_time, total_duration))
+        self._sequence_current_time = sequence_time
+
+        if not settings.repeat_clip_twice:
+            return self._read_source_frame_at_time(sequence_time)
+
+        (c1_start, c1_end), (c2_start, c2_end) = repeat_clip_ranges(settings, source_duration)
+        clip1_len = max(0.0, c1_end - c1_start)
+        clip2_len = max(0.0, c2_end - c2_start)
+        transition = repeat_dissolve_duration(settings, source_duration)
+        second_clip_at = max(0.0, clip1_len - transition)
+
+        if transition > 0.0 and second_clip_at <= sequence_time < clip1_len:
+            alpha = max(0.0, min(1.0, (sequence_time - second_clip_at) / transition))
+            frame1 = self._read_source_frame_at_time(c1_start + min(sequence_time, clip1_len))
+            frame2 = self._read_source_frame_at_time(c2_start + max(0.0, sequence_time - second_clip_at))
+            if frame1 is not None and frame2 is not None and frame1.shape == frame2.shape:
+                return cv2.addWeighted(frame1, 1.0 - alpha, frame2, alpha, 0.0)
+            return frame2 if frame2 is not None else frame1
+
+        if sequence_time < second_clip_at or clip2_len <= 0:
+            return self._read_source_frame_at_time(c1_start + min(sequence_time, clip1_len))
+
+        clip2_time = max(0.0, min(clip2_len, sequence_time - second_clip_at))
+        return self._read_source_frame_at_time(c2_start + clip2_time)
+
     def _update_time_display(self) -> None:
-        current = self.preview_engine.current_time()
-        total = self.preview_engine.duration_sec
+        total = self._effective_timeline_duration()
+        self._sequence_current_time = max(0.0, min(self._sequence_current_time, total))
+        current = self._sequence_current_time
         self.time_var.set(f"{format_time(current)} / {format_time(total)}")
         self.timeline_start_var.set("0:00")
         self.timeline_end_var.set(format_timeline_time(total))
@@ -4422,9 +4556,10 @@ class VideoEditorApp:
         return width, track_y, track_h, usable
 
     def _timeline_progress(self) -> float:
-        if self.preview_engine.frame_count <= 1:
+        total = self._effective_timeline_duration()
+        if total <= 0:
             return 0.0
-        return self.preview_engine.current_frame_idx / (self.preview_engine.frame_count - 1)
+        return max(0.0, min(1.0, self._sequence_current_time / total))
 
     def _timeline_thumb_position(self, progress: float | None = None) -> int:
         _, _, _, usable = self._timeline_track_metrics()
@@ -4445,13 +4580,14 @@ class VideoEditorApp:
             canvas.create_rectangle(0, track_y, px + TIMELINE_THUMB_WIDTH // 2, track_y + track_h, fill=THEME["accent"], outline="")
 
         self._sound_marker_x = -1
-        if self.preview_engine.duration_sec > 0 and bool(self.end_sound_enabled_var.get()):
+        timeline_duration = self._effective_timeline_duration()
+        if timeline_duration > 0 and bool(self.end_sound_enabled_var.get()):
             try:
                 before_end = max(0.0, float(self.end_sound_start_var.get()))
             except (TypeError, ValueError):
                 before_end = 5.0
-            start_sec = max(0.0, self.preview_engine.duration_sec - before_end)
-            marker_fraction = start_sec / self.preview_engine.duration_sec
+            start_sec = max(0.0, timeline_duration - before_end)
+            marker_fraction = start_sec / timeline_duration
             marker_x = int(max(0.0, min(1.0, marker_fraction)) * width)
             self._sound_marker_x = marker_x
             marker_w = 12
@@ -4506,13 +4642,16 @@ class VideoEditorApp:
     def _seek_to_fraction(self, fraction: float) -> None:
         if not self.preview_engine.is_loaded() or self.preview_engine.frame_count <= 0:
             return
-        max_idx = max(0, self.preview_engine.frame_count - 1)
-        frame_idx = int(round(fraction * max_idx))
-        self.preview_engine.seek(frame_idx)
-        self.timeline_var.set(frame_idx)
+        total = self._effective_timeline_duration()
+        if total <= 0:
+            return
+        sequence_time = max(0.0, min(1.0, fraction)) * total
+        frame = self._frame_for_sequence_time(sequence_time)
+        self.timeline_var.set(sequence_time)
         self._update_time_display()
         self._draw_timeline()
-        self._schedule_preview_render()
+        if frame is not None:
+            self._render_preview(frame)
 
     def _timeline_x_to_fraction(self, x: float) -> float:
         canvas_x = x - self.timeline_canvas.winfo_rootx()
@@ -4522,11 +4661,12 @@ class VideoEditorApp:
         return self._sound_marker_x >= 0 and abs(x - self._sound_marker_x) <= 12
 
     def _set_end_sound_from_timeline_x(self, x: float) -> None:
-        if self.preview_engine.duration_sec <= 0:
+        timeline_duration = self._effective_timeline_duration()
+        if timeline_duration <= 0:
             return
         fraction = self._timeline_fraction_from_x(x)
-        start_sec = fraction * self.preview_engine.duration_sec
-        before_end = max(0.0, self.preview_engine.duration_sec - start_sec)
+        start_sec = fraction * timeline_duration
+        before_end = max(0.0, timeline_duration - start_sec)
         self.end_sound_start_var.set(f"{before_end:.2f}".rstrip("0").rstrip("."))
         self._save_current_editor_state()
         self._draw_timeline()
@@ -4604,6 +4744,7 @@ class VideoEditorApp:
             self.preview_engine.playing = True
             self._play_started_at = time.perf_counter()
             self._play_start_frame_idx = self.preview_engine.current_frame_idx
+            self._play_start_sequence_time = self._sequence_current_time
             self.play_btn.configure(text="Pause")
             self._play_step()
 
@@ -4617,16 +4758,20 @@ class VideoEditorApp:
     def _play_step(self) -> None:
         if not self.preview_engine.playing or not self.preview_engine.is_loaded():
             return
+        total = self._effective_timeline_duration()
+        if total <= 0:
+            self.stop_playback()
+            return
         elapsed = max(0.0, time.perf_counter() - self._play_started_at)
-        target_idx = self._play_start_frame_idx + int(elapsed * self.preview_engine.fps)
-        if target_idx >= self.preview_engine.frame_count:
-            target_idx = 0
-            self._play_start_frame_idx = 0
+        target_time = self._play_start_sequence_time + elapsed
+        if target_time >= total:
+            target_time = 0.0
+            self._play_start_sequence_time = 0.0
             self._play_started_at = time.perf_counter()
 
-        frame = self.preview_engine.seek(target_idx)
+        frame = self._frame_for_sequence_time(target_time)
         if frame is not None:
-            self.timeline_var.set(target_idx)
+            self.timeline_var.set(target_time)
             self._render_preview(frame)
 
         self._play_after_id = self.root.after(1, self._play_step)
@@ -4666,8 +4811,8 @@ class VideoEditorApp:
             self.set_status("Failed to load video for preview.")
             return
         self.timeline_var.set(0)
-        self.timeline_start_var.set("0:00")
-        self.timeline_end_var.set(format_timeline_time(self.preview_engine.duration_sec))
+        self._sequence_current_time = 0.0
+        self._update_time_display()
         self.preview_engine.seek(0)
         self._render_preview()
         self._save_current_editor_state()

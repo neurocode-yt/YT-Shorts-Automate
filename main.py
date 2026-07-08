@@ -138,10 +138,12 @@ class EditorSettings:
     openai_api_key: str = ""
     openai_model: str = "gpt-5.5"
     metadata_system_prompt: str = (
-        "You are a YouTube Shorts metadata expert. Return exactly three labeled sections: "
-        "Title:, Description:, Tags:. Tags must be comma separated."
+        "You are a YouTube Shorts metadata expert. Return exactly four labeled sections: "
+        "Video Text:, Title:, Description:, Tags:. Video Text must be exactly two lines: "
+        "line 1 is the player's name, line 2 is a catchy 3-5 word phrase. Tags must be comma separated."
     )
     metadata_user_prompt: str = ""
+    generated_video_text: str = ""
     generated_title: str = ""
     generated_description: str = ""
     generated_tags: str = ""
@@ -837,11 +839,12 @@ def format_timeline_time(seconds: float) -> str:
 
 
 def parse_metadata_response(text: str) -> dict[str, str]:
-    result = {"title": "", "description": "", "tags": ""}
-    pattern = re.compile(r"(?im)^\s*(title|description|tags)\s*:\s*")
+    result = {"video_text": "", "title": "", "description": "", "tags": ""}
+    pattern = re.compile(r"(?im)^\s*(video\s*text|top\s*text|overlay\s*text|title|description|tags)\s*:\s*")
     matches = list(pattern.finditer(text or ""))
     for index, match in enumerate(matches):
-        key = match.group(1).lower()
+        raw_key = re.sub(r"\s+", " ", match.group(1).lower()).strip()
+        key = "video_text" if raw_key in {"video text", "top text", "overlay text"} else raw_key
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         result[key] = text[start:end].strip()
@@ -855,9 +858,24 @@ def parse_metadata_response(text: str) -> dict[str, str]:
     return result
 
 
+def normalize_video_text(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" not in text and "|" in text:
+        text = "\n".join(part.strip() for part in text.split("|", 1))
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    if len(lines) >= 2:
+        return f"{lines[0]}\n{' '.join(lines[1:])}"
+    return lines[0] if lines else ""
+
+
 def call_openai_metadata(api_key: str, model: str, system_prompt: str, user_prompt: str) -> str:
     if not user_prompt:
-        user_prompt = "Generate YouTube Shorts metadata for the currently edited short video."
+        user_prompt = (
+            "Generate YouTube Shorts metadata and a two-line video top text overlay for the currently edited short video."
+        )
     payload = {
         "model": model,
         "input": [
@@ -1720,20 +1738,27 @@ class VideoEditorApp:
         right = ttk.Frame(parent)
         right.grid(row=0, column=1, sticky=tk.NSEW)
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(1, weight=1)
+        right.rowconfigure(2, weight=1)
+
+        video_text_box = ttk.LabelFrame(right, text="  Video Top Text  ", padding=10, style="Card.TLabelframe")
+        video_text_box.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
+        video_text_box.columnconfigure(0, weight=1)
+        self.generated_video_text_var = tk.StringVar()
+        ttk.Entry(video_text_box, textvariable=self.generated_video_text_var).grid(row=0, column=0, sticky=tk.EW, ipady=4)
+        ttk.Button(video_text_box, text="Update", command=self.apply_generated_video_text).grid(row=0, column=1, padx=(8, 0))
 
         title_box = ttk.LabelFrame(right, text="  Title  ", padding=10, style="Card.TLabelframe")
-        title_box.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
+        title_box.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
         self.ai_title_var = tk.StringVar()
         ttk.Entry(title_box, textvariable=self.ai_title_var).pack(fill=tk.X, ipady=4)
 
         desc_box = ttk.LabelFrame(right, text="  Description  ", padding=10, style="Card.TLabelframe")
-        desc_box.grid(row=1, column=0, sticky=tk.NSEW, pady=(0, 10))
+        desc_box.grid(row=2, column=0, sticky=tk.NSEW, pady=(0, 10))
         self.ai_description_text = self._create_auto_text(desc_box, height=14)
         self.ai_description_text.pack(fill=tk.BOTH, expand=True)
 
         tags_box = ttk.LabelFrame(right, text="  Tags  ", padding=10, style="Card.TLabelframe")
-        tags_box.grid(row=2, column=0, sticky=tk.EW)
+        tags_box.grid(row=3, column=0, sticky=tk.EW)
         self.ai_tags_var = tk.StringVar()
         ttk.Entry(tags_box, textvariable=self.ai_tags_var).pack(fill=tk.X, ipady=4)
 
@@ -1843,6 +1868,7 @@ class VideoEditorApp:
 
     def _metadata_generation_success(self, raw_text: str) -> None:
         parsed = parse_metadata_response(raw_text)
+        self.generated_video_text_var.set(normalize_video_text(parsed.get("video_text", "")))
         self.ai_title_var.set(parsed.get("title", "").strip())
         self.ai_description_text.delete("1.0", tk.END)
         self.ai_description_text.insert("1.0", parsed.get("description", "").strip())
@@ -1855,6 +1881,30 @@ class VideoEditorApp:
         self.generate_metadata_btn.configure(state=tk.NORMAL)
         self.set_status(f"GPT generation failed: {message}", error=True)
         messagebox.showerror("GPT Error", message[:2000])
+
+    def apply_generated_video_text(self) -> None:
+        text = normalize_video_text(self.generated_video_text_var.get())
+        if not text:
+            messagebox.showinfo("Video Text", "Generate or type video top text first.")
+            return
+        self._push_undo_immediate()
+        widget = self._overlay_widgets.get("title")
+        if widget is None:
+            return
+        self._suspend_save = True
+        widget.delete("1.0", tk.END)
+        widget.insert("1.0", text)
+        title_overlay = self._overlay_from_settings("title")
+        apply_color_to_range(widget, "1.0", "end-1c", title_overlay.font_color)
+        first_end = widget.index("1.0 lineend")
+        if widget.compare(first_end, ">", "1.0"):
+            apply_color_to_range(widget, "1.0", first_end, title_overlay.first_line_color)
+        self._suspend_save = False
+        self._save_overlay_text_from_widget("title")
+        self.generated_video_text_var.set(text.replace("\n", " | "))
+        self._finish_edit()
+        self._render_preview()
+        self.set_status("Video top text updated.")
 
     def _grid_field_box(
         self, parent: ttk.Frame, title: str, row: int, column: int, columnspan: int = 1
@@ -2657,6 +2707,7 @@ class VideoEditorApp:
             self.end_sound_path_var,
             self.end_sound_start_var,
             self.openai_model_var,
+            self.generated_video_text_var,
             self.ai_title_var,
             self.ai_tags_var,
         ]
@@ -2724,6 +2775,7 @@ class VideoEditorApp:
         self.metadata_system_prompt_text.insert("1.0", s.metadata_system_prompt)
         self.metadata_user_prompt_text.delete("1.0", tk.END)
         self.metadata_user_prompt_text.insert("1.0", s.metadata_user_prompt)
+        self.generated_video_text_var.set(s.generated_video_text.replace("\n", " | "))
         self.ai_title_var.set(s.generated_title)
         self.ai_description_text.delete("1.0", tk.END)
         self.ai_description_text.insert("1.0", s.generated_description)
@@ -2799,6 +2851,7 @@ class VideoEditorApp:
             openai_model=self.openai_model_var.get().strip() or "gpt-5.5",
             metadata_system_prompt=self.metadata_system_prompt_text.get("1.0", "end-1c").strip(),
             metadata_user_prompt=self.metadata_user_prompt_text.get("1.0", "end-1c").strip(),
+            generated_video_text=normalize_video_text(self.generated_video_text_var.get()),
             generated_title=self.ai_title_var.get().strip(),
             generated_description=self.ai_description_text.get("1.0", "end-1c").strip(),
             generated_tags=self.ai_tags_var.get().strip(),

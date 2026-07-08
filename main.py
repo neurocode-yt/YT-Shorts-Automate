@@ -2711,9 +2711,10 @@ class VideoEditorApp:
         return box
 
     def open_trim_clips_dialog(self) -> None:
+        video_path = self.video_path_var.get().strip()
         duration = self.preview_engine.duration_sec if self.preview_engine.is_loaded() else 0.0
-        if duration <= 0 and self.video_path_var.get().strip():
-            duration = get_video_duration(self.video_path_var.get().strip())
+        if duration <= 0 and video_path:
+            duration = get_video_duration(video_path)
         if duration <= 0:
             messagebox.showerror("Trim Clips", "Load a video before trimming repeated clips.")
             return
@@ -2748,6 +2749,23 @@ class VideoEditorApp:
         trim_rows: list[dict[str, object]] = []
         min_gap = max(0.001, min(0.1, duration * 0.01))
         track_pad = 24
+        thumb_size = (132, 74)
+        thumb_cache: dict[float, ImageTk.PhotoImage] = {}
+        thumbnail_cap = cv2.VideoCapture(video_path) if video_path else None
+        thumbnail_fps = 30.0
+        thumbnail_frame_count = 0
+        if thumbnail_cap is not None and thumbnail_cap.isOpened():
+            thumbnail_fps = float(thumbnail_cap.get(cv2.CAP_PROP_FPS) or 30.0)
+            if thumbnail_fps <= 0:
+                thumbnail_fps = 30.0
+            thumbnail_frame_count = int(thumbnail_cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+        def close_dialog() -> None:
+            if thumbnail_cap is not None:
+                thumbnail_cap.release()
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
 
         def parse_saved_seconds(value: str) -> float:
             try:
@@ -2771,6 +2789,61 @@ class VideoEditorApp:
 
         def seconds_label(value: float) -> str:
             return f"{format_ffmpeg_seconds(value)}s"
+
+        def make_placeholder_thumbnail(label: str) -> ImageTk.PhotoImage:
+            image = Image.new("RGB", thumb_size, hex_to_rgb(THEME["surface2"]))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((0, 0, thumb_size[0] - 1, thumb_size[1] - 1), outline=hex_to_rgb(THEME["border"]))
+            draw.text((10, 28), label, fill=hex_to_rgb(THEME["text_muted"]))
+            return ImageTk.PhotoImage(image)
+
+        def make_thumbnail(seconds: float) -> ImageTk.PhotoImage:
+            key = round(clamp(seconds, 0.0, duration), 1)
+            if key in thumb_cache:
+                return thumb_cache[key]
+            if thumbnail_cap is None or not thumbnail_cap.isOpened() or thumbnail_frame_count <= 0:
+                photo = make_placeholder_thumbnail(format_time(key))
+                thumb_cache[key] = photo
+                return photo
+
+            target_seconds = clamp(key, 0.0, max(0.0, duration - (1.0 / thumbnail_fps)))
+            frame_idx = int(round(target_seconds * thumbnail_fps))
+            frame_idx = max(0, min(frame_idx, thumbnail_frame_count - 1))
+            thumbnail_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ok, frame = thumbnail_cap.read()
+            if not ok or frame is None:
+                photo = make_placeholder_thumbnail(format_time(target_seconds))
+                thumb_cache[key] = photo
+                return photo
+
+            frame_rgb = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            frame_rgb.thumbnail(thumb_size, Image.Resampling.LANCZOS)
+            image = Image.new("RGB", thumb_size, hex_to_rgb(THEME["surface2"]))
+            image.paste(
+                frame_rgb,
+                ((thumb_size[0] - frame_rgb.width) // 2, (thumb_size[1] - frame_rgb.height) // 2),
+            )
+            photo = ImageTk.PhotoImage(image)
+            thumb_cache[key] = photo
+            return photo
+
+        def update_row_previews(row: dict[str, object]) -> None:
+            start = float(row["start"])
+            end = float(row["end"])
+            start_photo = make_thumbnail(start)
+            end_photo = make_thumbnail(max(0.0, end - (1.0 / thumbnail_fps)))
+            row["start_photo"] = start_photo
+            row["end_photo"] = end_photo
+            row["start_preview"].configure(image=start_photo)
+            row["end_preview"].configure(image=end_photo)
+
+        def jump_to_time(seconds: float) -> None:
+            if not self.preview_engine.is_loaded() or duration <= 0:
+                return
+            target = clamp(seconds, 0.0, duration)
+            self.stop_playback()
+            self._seek_to_fraction(target / duration)
+            self.set_status(f"Timeline moved to {format_time(target)} from trim preview.")
 
         def row_width(row: dict[str, object]) -> int:
             return max(520, int(row["canvas"].winfo_width()))
@@ -2853,6 +2926,7 @@ class VideoEditorApp:
             update_labels()
             for row in trim_rows:
                 draw_row(row)
+                update_row_previews(row)
 
         def hit_mode(row: dict[str, object], x: float) -> str:
             sx = seconds_to_x(row, float(row["start"]))
@@ -2928,8 +3002,9 @@ class VideoEditorApp:
             box = ttk.LabelFrame(content, text=f"  {title}  ", padding=10, style="Card.TLabelframe")
             box.grid(row=grid_row, column=0, sticky=tk.EW, pady=(12, 0))
             box.columnconfigure(0, weight=1)
+            box.columnconfigure(1, weight=0)
             labels = ttk.Frame(box, style="Card.TFrame")
-            labels.grid(row=0, column=0, sticky=tk.EW)
+            labels.grid(row=0, column=0, columnspan=2, sticky=tk.EW)
             labels.columnconfigure(3, weight=1)
             start_label_var = tk.StringVar()
             end_label_var = tk.StringVar()
@@ -2956,6 +3031,45 @@ class VideoEditorApp:
             )
             canvas.grid(row=1, column=0, sticky=tk.EW, pady=(8, 0))
             row["canvas"] = canvas
+
+            preview_frame = ttk.Frame(box, style="Card.TFrame")
+            preview_frame.grid(row=1, column=1, sticky=tk.N, padx=(10, 0), pady=(8, 0))
+            start_preview_box = ttk.Frame(preview_frame, style="Card.TFrame")
+            start_preview_box.grid(row=0, column=0, padx=(0, 8))
+            end_preview_box = ttk.Frame(preview_frame, style="Card.TFrame")
+            end_preview_box.grid(row=0, column=1)
+            ttk.Label(start_preview_box, text="Start frame", style="CardMuted.TLabel").pack(anchor=tk.W)
+            ttk.Label(end_preview_box, text="End frame", style="CardMuted.TLabel").pack(anchor=tk.W)
+            start_preview = tk.Label(
+                start_preview_box,
+                bg=THEME["surface2"],
+                bd=1,
+                relief=tk.SOLID,
+                highlightthickness=1,
+                highlightbackground=THEME["border"],
+            )
+            start_preview.pack()
+            end_preview = tk.Label(
+                end_preview_box,
+                bg=THEME["surface2"],
+                bd=1,
+                relief=tk.SOLID,
+                highlightthickness=1,
+                highlightbackground=THEME["border"],
+            )
+            end_preview.pack()
+            ttk.Button(
+                start_preview_box,
+                text="Go Start",
+                command=lambda r=row: jump_to_time(float(r["start"])),
+            ).pack(fill=tk.X, pady=(6, 0))
+            ttk.Button(
+                end_preview_box,
+                text="Go End",
+                command=lambda r=row: jump_to_time(float(r["end"])),
+            ).pack(fill=tk.X, pady=(6, 0))
+            row["start_preview"] = start_preview
+            row["end_preview"] = end_preview
             canvas.bind("<Configure>", lambda _event, r=row: draw_row(r))
             canvas.bind("<Button-1>", lambda event, r=row: on_press(r, event))
             canvas.bind("<B1-Motion>", on_drag)
@@ -2989,7 +3103,7 @@ class VideoEditorApp:
             self.repeat_clip_twice_var.set(True)
             self._update_trim_summary()
             self._save_current_editor_state()
-            dialog.destroy()
+            close_dialog()
 
         def reset_all() -> None:
             for row in trim_rows:
@@ -2998,7 +3112,7 @@ class VideoEditorApp:
             redraw_all()
 
         ttk.Button(actions, text="Save Trim", command=save_trim, style="Accent.TButton").pack(side=tk.RIGHT)
-        ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(actions, text="Cancel", command=close_dialog).pack(side=tk.RIGHT, padx=(0, 8))
         ttk.Button(actions, text="Reset Both", command=reset_all).pack(side=tk.RIGHT, padx=(0, 8))
         dialog.bind("<ButtonRelease-1>", on_release)
         redraw_all()

@@ -147,6 +147,11 @@ class EditorSettings:
     end_sound_enabled: bool = False
     end_sound_path: str = DEFAULT_CLAP_SOUND
     end_sound_start_before_end: float = 5.0
+    repeat_clip_twice: bool = False
+    clip1_trim_start: float = 0.0
+    clip1_trim_end: float = 0.0
+    clip2_trim_start: float = 0.0
+    clip2_trim_end: float = 0.0
     openai_api_key: str = ""
     openai_model: str = "gpt-5.5"
     metadata_system_prompt: str = (
@@ -642,6 +647,47 @@ def check_ffmpeg() -> tuple[bool, str]:
     return True, ffmpeg
 
 
+def find_ffprobe_executable(ffmpeg_path: str | None = None) -> str | None:
+    for name in ("ffprobe", "ffprobe.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    if ffmpeg_path:
+        sibling = Path(ffmpeg_path).with_name("ffprobe.exe")
+        if sibling.is_file():
+            return str(sibling)
+    return None
+
+
+def video_has_audio_stream(path: str, ffmpeg_path: str | None = None) -> bool:
+    ffprobe = find_ffprobe_executable(ffmpeg_path)
+    if not ffprobe:
+        return True
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+                path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return bool(result.stdout.strip())
+
+
 def hex_to_ffmpeg_color(color: str) -> str:
     color = color.strip()
     if color.startswith("#"):
@@ -817,15 +863,115 @@ def build_video_filters(layout: VideoLayout, bg: str) -> list[str]:
     return filters
 
 
-def build_free_video_filtergraph(layout: VideoLayout, bg: str, post_filters: list[str]) -> str:
+def build_free_video_filtergraph(
+    layout: VideoLayout,
+    bg: str,
+    post_filters: list[str],
+    input_label: str = "0:v",
+    output_label: str = "v",
+) -> str:
     chain = [
         f"color=c={bg}:s={CANVAS_WIDTH}x{CANVAS_HEIGHT}:r=30[base]",
-        f"[0:v]scale={layout.fit_w}:{layout.fit_h}[clip]",
+        f"[{input_label}]scale={layout.fit_w}:{layout.fit_h}[clip]",
         f"[base][clip]overlay=x={layout.pad_x}:y={layout.pad_y}:shortest=1[composite]",
     ]
     tail = ",".join(post_filters) if post_filters else "null"
-    chain.append(f"[composite]{tail}[v]")
+    chain.append(f"[composite]{tail}[{output_label}]")
     return ";".join(chain)
+
+
+def format_ffmpeg_seconds(value: float) -> str:
+    return f"{max(0.0, value):.3f}".rstrip("0").rstrip(".") or "0"
+
+
+def normalize_clip_trim(start: float, end: float, duration: float) -> tuple[float, float]:
+    start = max(0.0, float(start or 0.0))
+    end = max(0.0, float(end or 0.0))
+    if duration > 0:
+        start = min(start, max(0.0, duration - 0.001))
+        if end <= 0.0 or end > duration:
+            end = duration
+        if end <= start:
+            end = duration
+    elif end > 0.0 and end <= start:
+        end = 0.0
+    return start, end
+
+
+def build_trim_arg(start: float, end: float) -> str:
+    parts = [f"start={format_ffmpeg_seconds(start)}"]
+    if end > 0.0:
+        parts.append(f"end={format_ffmpeg_seconds(end)}")
+    return ":".join(parts)
+
+
+def repeat_clip_output_duration(settings: EditorSettings, source_duration: float) -> float:
+    if source_duration <= 0:
+        return 0.0
+    c1_start, c1_end = normalize_clip_trim(
+        settings.clip1_trim_start,
+        settings.clip1_trim_end,
+        source_duration,
+    )
+    c2_start, c2_end = normalize_clip_trim(
+        settings.clip2_trim_start,
+        settings.clip2_trim_end,
+        source_duration,
+    )
+    return max(0.0, c1_end - c1_start) + max(0.0, c2_end - c2_start)
+
+
+def build_repeat_clip_filtergraph_prefix(
+    settings: EditorSettings,
+    source_duration: float,
+    include_audio: bool,
+) -> tuple[list[str], str, str | None]:
+    c1_start, c1_end = normalize_clip_trim(
+        settings.clip1_trim_start,
+        settings.clip1_trim_end,
+        source_duration,
+    )
+    c2_start, c2_end = normalize_clip_trim(
+        settings.clip2_trim_start,
+        settings.clip2_trim_end,
+        source_duration,
+    )
+    c1 = build_trim_arg(c1_start, c1_end)
+    c2 = build_trim_arg(c2_start, c2_end)
+
+    parts = [
+        f"[0:v]trim={c1},setpts=PTS-STARTPTS[segv1]",
+        f"[0:v]trim={c2},setpts=PTS-STARTPTS[segv2]",
+    ]
+    if include_audio:
+        parts.extend(
+            [
+                f"[0:a]atrim={c1},asetpts=PTS-STARTPTS[sega1]",
+                f"[0:a]atrim={c2},asetpts=PTS-STARTPTS[sega2]",
+                "[segv1][sega1][segv2][sega2]concat=n=2:v=1:a=1[repeatv][repeata]",
+            ]
+        )
+        return parts, "repeatv", "repeata"
+
+    parts.append("[segv1][segv2]concat=n=2:v=1:a=0[repeatv]")
+    return parts, "repeatv", None
+
+
+def build_end_sound_audio_filter(
+    sound_input_index: int,
+    audio_delay_ms: int,
+    base_audio_label: str | None = "0:a",
+    output_duration: float = 0.0,
+) -> str:
+    delayed = f"[{sound_input_index}:a]adelay={audio_delay_ms}|{audio_delay_ms},volume=1.30"
+    if base_audio_label:
+        return (
+            f"{delayed}[clap];"
+            f"[{base_audio_label}][clap]amix=inputs=2:duration=first:dropout_transition=0[a]"
+        )
+    if output_duration > 0:
+        delayed += f",apad,atrim=0:{format_ffmpeg_seconds(output_duration)}"
+    return f"{delayed}[a]"
 
 
 def build_text_xy(position: str, custom_x: int, custom_y: int) -> tuple[str, str]:
@@ -1070,29 +1216,58 @@ class FFmpegBuilder:
             s.video_path,
         ]
         use_end_sound = s.end_sound_enabled and bool(s.end_sound_path) and Path(s.end_sound_path).is_file()
+        use_repeat = bool(s.repeat_clip_twice)
+        source_duration = get_video_duration(s.video_path) if (use_repeat or use_end_sound) else 0.0
+        output_duration = repeat_clip_output_duration(s, source_duration) if use_repeat else source_duration
         audio_delay_ms = 0
         if use_end_sound:
-            duration = get_video_duration(s.video_path)
-            start_at = max(0.0, duration - max(0.0, float(s.end_sound_start_before_end)))
+            start_at = max(0.0, output_duration - max(0.0, float(s.end_sound_start_before_end)))
             audio_delay_ms = int(start_at * 1000)
             cmd.extend(["-i", s.end_sound_path])
 
-        if s.crop_mode:
-            if use_end_sound:
-                audio_graph = (
-                    f"[1:a]adelay={audio_delay_ms}|{audio_delay_ms},volume=1.30[clap];"
-                    "[0:a][clap]amix=inputs=2:duration=first:dropout_transition=0[a]"
+        if use_repeat:
+            include_audio = video_has_audio_stream(s.video_path, ffmpeg)
+            filter_parts, source_video_label, source_audio_label = build_repeat_clip_filtergraph_prefix(
+                s,
+                source_duration,
+                include_audio,
+            )
+            if s.crop_mode:
+                tail = ",".join(video_filters + overlay_filters) if (video_filters or overlay_filters) else "null"
+                filter_parts.append(f"[{source_video_label}]{tail}[v]")
+            else:
+                filter_parts.append(
+                    build_free_video_filtergraph(
+                        layout,
+                        bg,
+                        overlay_filters,
+                        input_label=source_video_label,
+                    )
                 )
+            if use_end_sound:
+                filter_parts.append(
+                    build_end_sound_audio_filter(
+                        1,
+                        audio_delay_ms,
+                        base_audio_label=source_audio_label,
+                        output_duration=output_duration,
+                    )
+                )
+            cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", "[v]"])
+            if use_end_sound:
+                cmd.extend(["-map", "[a]"])
+            elif source_audio_label:
+                cmd.extend(["-map", f"[{source_audio_label}]"])
+        elif s.crop_mode:
+            if use_end_sound:
+                audio_graph = build_end_sound_audio_filter(1, audio_delay_ms, base_audio_label="0:a")
                 cmd.extend(["-vf", vf, "-filter_complex", audio_graph, "-map", "0:v", "-map", "[a]"])
             else:
                 cmd.extend(["-vf", vf, "-map", "0:v", "-map", "0:a?"])
         else:
             filtergraph = build_free_video_filtergraph(layout, bg, overlay_filters)
             if use_end_sound:
-                filtergraph += (
-                    f";[1:a]adelay={audio_delay_ms}|{audio_delay_ms},volume=1.30[clap];"
-                    "[0:a][clap]amix=inputs=2:duration=first:dropout_transition=0[a]"
-                )
+                filtergraph += ";" + build_end_sound_audio_filter(1, audio_delay_ms, base_audio_label="0:a")
             cmd.extend(
                 [
                     "-filter_complex",
@@ -1685,6 +1860,27 @@ class VideoEditorApp:
         self.video_path_var = tk.StringVar()
         ttk.Entry(video_row, textvariable=self.video_path_var).grid(row=0, column=0, sticky=tk.EW, ipady=4)
         ttk.Button(video_row, text="Browse", command=self.select_video).grid(row=0, column=1, padx=(8, 0))
+
+        self.repeat_clip_twice_var = tk.BooleanVar(value=False)
+        self.clip1_trim_start_var = tk.StringVar(value="0")
+        self.clip1_trim_end_var = tk.StringVar(value="0")
+        self.clip2_trim_start_var = tk.StringVar(value="0")
+        self.clip2_trim_end_var = tk.StringVar(value="0")
+        self.trim_summary_var = tk.StringVar(value="Clip 1: full | Clip 2: full")
+        clip_row = ttk.Frame(video_frame, style="Card.TFrame")
+        clip_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Checkbutton(
+            clip_row,
+            text="Repeat video twice",
+            variable=self.repeat_clip_twice_var,
+        ).pack(side=tk.LEFT)
+        ttk.Button(clip_row, text="Trim Clips", command=self.open_trim_clips_dialog).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(
+            clip_row,
+            textvariable=self.trim_summary_var,
+            style="CardMuted.TLabel",
+            wraplength=360,
+        ).pack(side=tk.LEFT, padx=(10, 0), fill=tk.X, expand=True)
 
         text_frame = ttk.LabelFrame(left, text="  Overlay Text  ", padding=10, style="Card.TLabelframe")
         text_frame.pack(fill=tk.X, pady=(0, 10))
@@ -2514,6 +2710,116 @@ class VideoEditorApp:
         box.grid(row=row, column=column, columnspan=columnspan, sticky=tk.NSEW, padx=4, pady=4)
         return box
 
+    def open_trim_clips_dialog(self) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Trim Repeated Clips")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        content = ttk.Frame(dialog, padding=12)
+        content.pack(fill=tk.BOTH, expand=True)
+        for col in range(3):
+            content.columnconfigure(col, weight=1)
+
+        duration = self.preview_engine.duration_sec if self.preview_engine.is_loaded() else 0.0
+        if duration <= 0 and self.video_path_var.get().strip():
+            duration = get_video_duration(self.video_path_var.get().strip())
+
+        ttk.Label(
+            content,
+            text=f"Source length: {format_time(duration)}. Set End to 0 to use the rest of the clip.",
+            style="Muted.TLabel",
+        ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+        ttk.Label(content, text="Clip", style="Muted.TLabel").grid(row=1, column=0, sticky=tk.W)
+        ttk.Label(content, text="Start (sec)", style="Muted.TLabel").grid(row=1, column=1, sticky=tk.W, padx=(8, 0))
+        ttk.Label(content, text="End (sec)", style="Muted.TLabel").grid(row=1, column=2, sticky=tk.W, padx=(8, 0))
+
+        clip1_start_var = tk.StringVar(value=self.clip1_trim_start_var.get())
+        clip1_end_var = tk.StringVar(value=self.clip1_trim_end_var.get())
+        clip2_start_var = tk.StringVar(value=self.clip2_trim_start_var.get())
+        clip2_end_var = tk.StringVar(value=self.clip2_trim_end_var.get())
+        fields = [
+            ("Clip 1", clip1_start_var, clip1_end_var),
+            ("Clip 2", clip2_start_var, clip2_end_var),
+        ]
+        entries: list[ttk.Entry] = []
+        for index, (label, start_var, end_var) in enumerate(fields, start=2):
+            ttk.Label(content, text=label).grid(row=index, column=0, sticky=tk.W, pady=(6, 0))
+            start_entry = ttk.Entry(content, textvariable=start_var, width=12)
+            start_entry.grid(row=index, column=1, sticky=tk.EW, padx=(8, 0), pady=(6, 0))
+            end_entry = ttk.Entry(content, textvariable=end_var, width=12)
+            end_entry.grid(row=index, column=2, sticky=tk.EW, padx=(8, 0), pady=(6, 0))
+            entries.extend([start_entry, end_entry])
+
+        actions = ttk.Frame(content)
+        actions.grid(row=4, column=0, columnspan=3, sticky=tk.E, pady=(12, 0))
+
+        def parse_seconds(value: str, label: str) -> float:
+            try:
+                number = float(value.strip() or "0")
+            except ValueError as exc:
+                raise ValueError(f"{label} must be a number.") from exc
+            if number < 0:
+                raise ValueError(f"{label} cannot be negative.")
+            return number
+
+        def save_trim() -> None:
+            try:
+                values = [
+                    parse_seconds(clip1_start_var.get(), "Clip 1 start"),
+                    parse_seconds(clip1_end_var.get(), "Clip 1 end"),
+                    parse_seconds(clip2_start_var.get(), "Clip 2 start"),
+                    parse_seconds(clip2_end_var.get(), "Clip 2 end"),
+                ]
+                for clip_idx, start, end in ((1, values[0], values[1]), (2, values[2], values[3])):
+                    if end > 0 and end <= start:
+                        raise ValueError(f"Clip {clip_idx} end must be after start, or set End to 0.")
+                    if duration > 0 and start >= duration:
+                        raise ValueError(f"Clip {clip_idx} start must be before the source ends.")
+            except ValueError as exc:
+                messagebox.showerror("Trim Clips", str(exc), parent=dialog)
+                return
+
+            self.clip1_trim_start_var.set(format_ffmpeg_seconds(values[0]))
+            self.clip1_trim_end_var.set(format_ffmpeg_seconds(values[1]))
+            self.clip2_trim_start_var.set(format_ffmpeg_seconds(values[2]))
+            self.clip2_trim_end_var.set(format_ffmpeg_seconds(values[3]))
+            self._update_trim_summary()
+            self._save_current_editor_state()
+            dialog.destroy()
+
+        ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Save Trim", command=save_trim, style="Accent.TButton").pack(side=tk.RIGHT, padx=(0, 8))
+        if entries:
+            entries[0].focus_set()
+
+    def _update_trim_summary(self) -> None:
+        if not hasattr(self, "trim_summary_var"):
+            return
+
+        def parse(value: str) -> float:
+            try:
+                return max(0.0, float(value.strip() or "0"))
+            except (TypeError, ValueError):
+                return 0.0
+
+        def label(start_value: str, end_value: str) -> str:
+            start = parse(start_value)
+            end = parse(end_value)
+            if start <= 0.0 and end <= 0.0:
+                return "full"
+            if end <= 0.0:
+                return f"{format_ffmpeg_seconds(start)}s to end"
+            return f"{format_ffmpeg_seconds(start)}s to {format_ffmpeg_seconds(end)}s"
+
+        self.trim_summary_var.set(
+            "Clip 1: "
+            + label(self.clip1_trim_start_var.get(), self.clip1_trim_end_var.get())
+            + " | Clip 2: "
+            + label(self.clip2_trim_start_var.get(), self.clip2_trim_end_var.get())
+        )
+
     def _active_text_widget(self) -> scrolledtext.ScrolledText:
         return self._overlay_widgets[self._active_overlay_id]
 
@@ -3310,6 +3616,10 @@ class VideoEditorApp:
             self.export_quality_var,
             self.end_sound_path_var,
             self.end_sound_start_var,
+            self.clip1_trim_start_var,
+            self.clip1_trim_end_var,
+            self.clip2_trim_start_var,
+            self.clip2_trim_end_var,
             self.openai_model_var,
             self.ai_title_var,
             self.ai_tags_var,
@@ -3320,6 +3630,7 @@ class VideoEditorApp:
             self.crop_mode_var,
             self.video_center_align_var,
             self.end_sound_enabled_var,
+            self.repeat_clip_twice_var,
             self.text_box_var,
             self.text_shadow_var,
             self.text_outline_var,
@@ -3372,6 +3683,12 @@ class VideoEditorApp:
         self.end_sound_enabled_var.set(s.end_sound_enabled)
         self.end_sound_path_var.set(s.end_sound_path)
         self.end_sound_start_var.set(str(s.end_sound_start_before_end))
+        self.repeat_clip_twice_var.set(s.repeat_clip_twice)
+        self.clip1_trim_start_var.set(str(s.clip1_trim_start))
+        self.clip1_trim_end_var.set(str(s.clip1_trim_end))
+        self.clip2_trim_start_var.set(str(s.clip2_trim_start))
+        self.clip2_trim_end_var.set(str(s.clip2_trim_end))
+        self._update_trim_summary()
         self.openai_api_key_var.set(s.openai_api_key)
         self.openai_model_var.set(s.openai_model)
         self.metadata_system_prompt_text.delete("1.0", tk.END)
@@ -3460,6 +3777,11 @@ class VideoEditorApp:
             end_sound_enabled=bool(self.end_sound_enabled_var.get()),
             end_sound_path=self.end_sound_path_var.get().strip() or DEFAULT_CLAP_SOUND,
             end_sound_start_before_end=parse_float(self.end_sound_start_var.get(), 5.0),
+            repeat_clip_twice=bool(self.repeat_clip_twice_var.get()),
+            clip1_trim_start=parse_float(self.clip1_trim_start_var.get(), 0.0),
+            clip1_trim_end=parse_float(self.clip1_trim_end_var.get(), 0.0),
+            clip2_trim_start=parse_float(self.clip2_trim_start_var.get(), 0.0),
+            clip2_trim_end=parse_float(self.clip2_trim_end_var.get(), 0.0),
             openai_api_key=self.openai_api_key_var.get().strip(),
             openai_model=self.openai_model_var.get().strip() or "gpt-5.5",
             metadata_system_prompt=self.metadata_system_prompt_text.get("1.0", "end-1c").strip(),

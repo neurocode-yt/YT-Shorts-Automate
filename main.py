@@ -22,6 +22,18 @@ from tkinter import colorchooser, filedialog, messagebox, scrolledtext, ttk
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
+from datetime import datetime, timezone
+
+# Google OAuth and YouTube API imports
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    HAS_GOOGLE_API = True
+except ImportError:
+    HAS_GOOGLE_API = False
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -148,6 +160,12 @@ class EditorSettings:
     generated_description: str = ""
     generated_tags: str = ""
     last_preset: str = ""
+    last_upload_time: str = ""
+    upload_title: str = ""
+    upload_description: str = ""
+    upload_tags: str = ""
+    upload_queue: bool = True
+    last_upload_title: str = ""
 
     def __post_init__(self) -> None:
         if not self.output_folder:
@@ -840,11 +858,11 @@ def format_timeline_time(seconds: float) -> str:
 
 def parse_metadata_response(text: str) -> dict[str, str]:
     result = {"video_text": "", "title": "", "description": "", "tags": ""}
-    pattern = re.compile(r"(?im)^\s*(video\s*text|top\s*text|overlay\s*text|title|description|tags)\s*:\s*")
+    pattern = re.compile(r"(?im)^\s*(video\s*top\s*text|video\s*text|top\s*text|overlay\s*text|title|description|tags)\s*:\s*")
     matches = list(pattern.finditer(text or ""))
     for index, match in enumerate(matches):
         raw_key = re.sub(r"\s+", " ", match.group(1).lower()).strip()
-        key = "video_text" if raw_key in {"video text", "top text", "overlay text"} else raw_key
+        key = "video_text" if raw_key in {"video text", "video top text", "top text", "overlay text"} else raw_key
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         result[key] = text[start:end].strip()
@@ -869,6 +887,52 @@ def normalize_video_text(text: str) -> str:
     if len(lines) >= 2:
         return f"{lines[0]}\n{' '.join(lines[1:])}"
     return lines[0] if lines else ""
+
+
+def parse_schedule_time(date_str: str, time_str: str) -> str:
+    """Parses date and time strings and returns ISO 8601 UTC string."""
+    date_str = date_str.strip()
+    time_str = time_str.strip()
+    if not date_str:
+        raise ValueError("Date is required for scheduling.")
+    if not time_str:
+        time_str = "00:00"
+
+    date_str = date_str.replace("/", "-").replace(".", "-")
+    date_formats = ["%Y-%m-%d", "%d-%m-%Y", "%m-%d-%Y"]
+    time_formats = ["%H:%M:%S", "%H:%M", "%I:%M %p", "%I:%M%p"]
+
+    dt = None
+    for df in date_formats:
+        try:
+            parsed_date = datetime.strptime(date_str, df)
+            dt = parsed_date
+            break
+        except ValueError:
+            continue
+
+    if not dt:
+        raise ValueError("Invalid date format. Please use YYYY-MM-DD.")
+
+    parsed_time = None
+    for tf in time_formats:
+        try:
+            parsed_time = datetime.strptime(time_str, tf).time()
+            break
+        except ValueError:
+            continue
+
+    if parsed_time is None:
+        raise ValueError("Invalid time format. Please use HH:MM or HH:MM AM/PM.")
+
+    dt = datetime.combine(dt.date(), parsed_time)
+    dt_local = dt.astimezone()
+    dt_utc = dt_local.astimezone(timezone.utc)
+
+    if dt_utc <= datetime.now(timezone.utc):
+        raise ValueError("Scheduled time must be in the future.")
+
+    return dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def call_openai_metadata(api_key: str, model: str, system_prompt: str, user_prompt: str) -> str:
@@ -1358,6 +1422,9 @@ class VideoEditorApp:
         if self.settings.video_path and Path(self.settings.video_path).is_file():
             self._load_video_preview(self.settings.video_path, show_error=False)
 
+        if HAS_GOOGLE_API:
+            self.root.after(500, self._check_existing_youtube_auth)
+
     def _maximize_for_editing(self) -> None:
         try:
             self.root.state("zoomed")
@@ -1743,9 +1810,10 @@ class VideoEditorApp:
         video_text_box = ttk.LabelFrame(right, text="  Video Top Text  ", padding=10, style="Card.TLabelframe")
         video_text_box.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
         video_text_box.columnconfigure(0, weight=1)
-        self.generated_video_text_var = tk.StringVar()
-        ttk.Entry(video_text_box, textvariable=self.generated_video_text_var).grid(row=0, column=0, sticky=tk.EW, ipady=4)
-        ttk.Button(video_text_box, text="Update", command=self.apply_generated_video_text).grid(row=0, column=1, padx=(8, 0))
+        video_text_box.rowconfigure(0, weight=1)
+        self.generated_video_text_text = self._create_auto_text(video_text_box, height=2)
+        self.generated_video_text_text.grid(row=0, column=0, sticky=tk.NSEW, pady=2)
+        ttk.Button(video_text_box, text="Update", command=self.apply_generated_video_text).grid(row=0, column=1, padx=(8, 0), sticky=tk.NSEW)
 
         title_box = ttk.LabelFrame(right, text="  Title  ", padding=10, style="Card.TLabelframe")
         title_box.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
@@ -1765,35 +1833,563 @@ class VideoEditorApp:
     def _build_upload_section(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
 
+        # 1. Video File Selector
         video_box = ttk.LabelFrame(parent, text="  Video File  ", padding=10, style="Card.TLabelframe")
         video_box.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
         video_box.columnconfigure(0, weight=1)
         self.upload_video_var = tk.StringVar()
         ttk.Entry(video_box, textvariable=self.upload_video_var).grid(row=0, column=0, sticky=tk.EW, ipady=4)
-        ttk.Button(video_box, text="Browse").grid(row=0, column=1, padx=(8, 0))
+        
+        btn_frame = ttk.Frame(video_box)
+        btn_frame.grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(btn_frame, text="Browse", command=self.browse_upload_video).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Fetch Video from Editor", command=self.fetch_video_and_metadata).pack(side=tk.LEFT, padx=(8, 0))
 
+        # 2. Dedicated Metadata Fields
+        metadata_box = ttk.LabelFrame(parent, text="  YouTube Metadata  ", padding=10, style="Card.TLabelframe")
+        metadata_box.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
+        metadata_box.columnconfigure(0, weight=1)
+
+        ttk.Label(metadata_box, text="Title", style="CardMuted.TLabel").grid(row=0, column=0, sticky=tk.W)
+        self.upload_title_var = tk.StringVar()
+        ttk.Entry(metadata_box, textvariable=self.upload_title_var).grid(row=1, column=0, sticky=tk.EW, ipady=4, pady=(2, 8))
+
+        ttk.Label(metadata_box, text="Description", style="CardMuted.TLabel").grid(row=2, column=0, sticky=tk.W)
+        self.upload_description_text = self._create_auto_text(metadata_box, height=6)
+        self.upload_description_text.grid(row=3, column=0, sticky=tk.EW, pady=(2, 8))
+
+        ttk.Label(metadata_box, text="Tags", style="CardMuted.TLabel").grid(row=4, column=0, sticky=tk.W)
+        self.upload_tags_var = tk.StringVar()
+        ttk.Entry(metadata_box, textvariable=self.upload_tags_var).grid(row=5, column=0, sticky=tk.EW, ipady=4, pady=(2, 0))
+
+        # 3. Schedule Settings
         schedule_box = ttk.LabelFrame(parent, text="  Schedule  ", padding=10, style="Card.TLabelframe")
-        schedule_box.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
+        schedule_box.grid(row=2, column=0, sticky=tk.EW, pady=(0, 10))
         schedule_box.columnconfigure(1, weight=1)
+        
+        self.upload_queue_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            schedule_box,
+            text="Queue uploads (6-hour interval)",
+            variable=self.upload_queue_var,
+            command=self.refresh_upload_schedule_ui
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+
         self.upload_privacy_var = tk.StringVar(value="private")
         self.upload_date_var = tk.StringVar()
         self.upload_time_var = tk.StringVar()
-        ttk.Label(schedule_box, text="Privacy", style="CardMuted.TLabel").grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(schedule_box, text="Privacy", style="CardMuted.TLabel").grid(row=1, column=0, sticky=tk.W)
         ttk.Combobox(
             schedule_box,
             textvariable=self.upload_privacy_var,
             values=["private", "unlisted", "public"],
             state="readonly",
-        ).grid(row=0, column=1, sticky=tk.EW, padx=(8, 0))
-        ttk.Label(schedule_box, text="Date", style="CardMuted.TLabel").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(schedule_box, textvariable=self.upload_date_var).grid(row=1, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
-        ttk.Label(schedule_box, text="Time", style="CardMuted.TLabel").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(schedule_box, textvariable=self.upload_time_var).grid(row=2, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
+        ).grid(row=1, column=1, sticky=tk.EW, padx=(8, 0))
+        ttk.Label(schedule_box, text="Date (YYYY-MM-DD)", style="CardMuted.TLabel").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Entry(schedule_box, textvariable=self.upload_date_var, state="readonly").grid(row=2, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
+        ttk.Label(schedule_box, text="Time (HH:MM)", style="CardMuted.TLabel").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Entry(schedule_box, textvariable=self.upload_time_var, state="readonly").grid(row=3, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
 
+        # 4. Connection & Upload History Box
+        history_box = ttk.LabelFrame(parent, text="  Last Uploaded Video  ", padding=10, style="Card.TLabelframe")
+        history_box.grid(row=3, column=0, sticky=tk.EW, pady=(0, 10))
+        history_box.columnconfigure(0, weight=1)
+
+        self.last_upload_title_lbl = ttk.Label(history_box, text="Title: None", font=("Segoe UI", 9, "bold"))
+        self.last_upload_title_lbl.grid(row=0, column=0, sticky=tk.W)
+
+        self.last_upload_time_lbl = ttk.Label(history_box, text="Scheduled/Uploaded: Never", style="CardMuted.TLabel")
+        self.last_upload_time_lbl.grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
+
+        # 5. Actions Row
         actions = ttk.Frame(parent)
-        actions.grid(row=2, column=0, sticky=tk.EW)
-        ttk.Button(actions, text="Connect YouTube").pack(side=tk.LEFT)
-        ttk.Button(actions, text="Upload / Schedule", style="Accent.TButton").pack(side=tk.LEFT, padx=(8, 0))
+        actions.grid(row=4, column=0, sticky=tk.EW)
+        
+        # Connection Setup Frame (Slot 1, column 0)
+        self.yt_setup_frame = ttk.Frame(actions)
+        self.yt_setup_frame.grid(row=0, column=0, sticky=tk.W)
+        
+        self.connect_yt_btn = ttk.Button(self.yt_setup_frame, text="Connect YouTube", command=self.youtube_connect_start)
+        self.connect_yt_btn.pack(side=tk.LEFT)
+
+        # Small dropdown options button next to Connect YouTube button
+        self.yt_menu = tk.Menu(self.connect_yt_btn, tearoff=False)
+        self.yt_menu.add_command(label="Import client_secrets.json...", command=self.import_client_secrets)
+        self.yt_menu.add_command(label="Disconnect / Sign Out", command=self.disconnect_youtube)
+        
+        self.yt_opt_btn = ttk.Menubutton(self.yt_setup_frame, text="▼")
+        self.yt_opt_btn.pack(side=tk.LEFT, padx=(4, 0))
+        self.yt_opt_btn["menu"] = self.yt_menu
+
+        # Frame for active channel connection state (Slot 2, column 0 - overlaps Setup Frame)
+        self.channel_status_frame = ttk.Frame(actions)
+        self.channel_status_frame.grid(row=0, column=0, sticky=tk.W)
+        
+        self.channel_name_lbl = ttk.Label(self.channel_status_frame, text="Connected: Loading...", font=("Segoe UI", 9, "bold"))
+        self.channel_name_lbl.pack(side=tk.LEFT)
+        
+        self.disconnect_link = ttk.Button(self.channel_status_frame, text="Disconnect", style="Toolbutton", command=self.disconnect_youtube)
+        self.disconnect_link.pack(side=tk.LEFT, padx=(8, 0))
+
+        # Upload / Schedule button (Slot 3, column 1)
+        self.upload_btn = ttk.Button(actions, text="Upload / Schedule", style="Accent.TButton", command=self.youtube_upload_start)
+        self.upload_btn.grid(row=0, column=1, padx=(8, 0), sticky=tk.W)
+
+        # Check and set button visibility based on credentials files
+        self.update_youtube_buttons_visibility()
+
+    def fetch_video_and_metadata(self) -> None:
+        self.start_export()
+        
+        # Populate dedicated fields from editor metadata
+        title = self.ai_title_var.get().strip()
+        description = self.ai_description_text.get("1.0", "end-1c").strip()
+        tags = self.ai_tags_var.get().strip()
+        
+        self.upload_title_var.set(title)
+        self.upload_description_text.delete("1.0", tk.END)
+        self.upload_description_text.insert("1.0", description)
+        self.upload_tags_var.set(tags)
+        
+        if HAS_GOOGLE_API:
+            self.refresh_upload_schedule_ui()
+
+    def calculate_next_upload_time(self) -> tuple[datetime, bool]:
+        """Returns (target_time_utc, is_scheduled)."""
+        now = datetime.now(timezone.utc)
+        if not self.upload_queue_var.get():
+            return now, False
+
+        if not self.settings.last_upload_time:
+            return now, False
+
+        try:
+            from datetime import timedelta
+            last_time = datetime.fromisoformat(self.settings.last_upload_time.replace("Z", "+00:00"))
+            if last_time + timedelta(hours=6) >= now:
+                return last_time + timedelta(hours=6), True
+        except Exception:
+            pass
+        return now, False
+
+    def update_youtube_buttons_visibility(self) -> None:
+        client_secrets_path = APP_DIR / "client_secrets.json"
+        token_path = APP_DIR / "token.json"
+        
+        secrets_exist = client_secrets_path.exists()
+        token_exists = token_path.exists()
+        
+        if secrets_exist and token_exists:
+            # Hide setup buttons, show connection status
+            self.yt_setup_frame.grid_remove()
+            self.channel_status_frame.grid()
+        else:
+            # Hide connection status, show setup buttons
+            self.channel_status_frame.grid_remove()
+            self.yt_setup_frame.grid()
+
+    def refresh_upload_schedule_ui(self) -> None:
+        target_time, is_scheduled = self.calculate_next_upload_time()
+        local_time = target_time.astimezone()
+        self.upload_date_var.set(local_time.strftime("%Y-%m-%d"))
+        self.upload_time_var.set(local_time.strftime("%H:%M"))
+
+    def refresh_upload_history_ui(self) -> None:
+        title = self.settings.last_upload_title or "None"
+        self.last_upload_title_lbl.configure(text=f"Title: {title}")
+        
+        if self.settings.last_upload_time:
+            try:
+                last_time = datetime.fromisoformat(self.settings.last_upload_time.replace("Z", "+00:00"))
+                local_time = last_time.astimezone()
+                date_str = local_time.strftime("%Y-%m-%d")
+                time_str = local_time.strftime("%I:%M %p")
+                self.last_upload_time_lbl.configure(text=f"Scheduled/Uploaded: {date_str} at {time_str}")
+            except Exception:
+                self.last_upload_time_lbl.configure(text="Scheduled/Uploaded: Unknown format")
+        else:
+            self.last_upload_time_lbl.configure(text="Scheduled/Uploaded: Never")
+
+    def browse_upload_video(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select Exported Video",
+            filetypes=[("MP4 Videos", "*.mp4"), ("All Files", "*.*")]
+        )
+        if path:
+            self.upload_video_var.set(path)
+
+    def youtube_connect_start(self) -> None:
+        if not HAS_GOOGLE_API:
+            messagebox.showerror(
+                "Libraries Missing",
+                "Google API libraries are not installed or failed to load.\n\n"
+                "Please run: pip install google-api-python-client google-auth-oauthlib google-auth-httplib2"
+            )
+            return
+
+        self.connect_yt_btn.configure(state=tk.DISABLED)
+        self.set_status("Starting YouTube connection flow...")
+        threading.Thread(target=self._run_youtube_connect, daemon=True).start()
+
+    def _run_youtube_connect(self) -> None:
+        try:
+            client_secrets_path = APP_DIR / "client_secrets.json"
+            token_path = APP_DIR / "token.json"
+
+            if not client_secrets_path.exists() and not token_path.exists():
+                raise FileNotFoundError(
+                    f"Credentials file 'client_secrets.json' not found in:\n{APP_DIR}\n\n"
+                    "Please download the OAuth Client ID json file from Google Cloud Console, "
+                    "save it in that folder, and rename it to 'client_secrets.json'."
+                )
+
+            creds = None
+            if token_path.exists():
+                try:
+                    creds = Credentials.from_authorized_user_file(str(token_path), ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly"])
+                except Exception:
+                    pass
+
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    self.root.after(0, lambda: self.set_status("Refreshing expired credentials..."))
+                    try:
+                        creds.refresh(Request())
+                    except Exception:
+                        creds = None
+
+                if not creds:
+                    self.root.after(0, lambda: self.set_status("Please complete authentication in your web browser..."))
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        str(client_secrets_path),
+                        scopes=["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly"]
+                    )
+                    
+                    import webbrowser
+                    original_open = webbrowser.open
+
+                    def custom_open(url, new=0, autoraise=True):
+                        # Copy URL to clipboard and show popup dialog safely from main thread
+                        def copy_and_alert():
+                            try:
+                                self.root.clipboard_clear()
+                                self.root.clipboard_append(url)
+                                self.root.update()
+                            except Exception:
+                                pass
+                            messagebox.showinfo(
+                                "YouTube Authorization",
+                                "The YouTube login link has been copied to your clipboard!\n\n"
+                                "1. Open Google Chrome (where your channel is logged in).\n"
+                                "2. Paste the link into the address bar (Ctrl+V) and press Enter.\n"
+                                "3. Complete the login and grant permissions.\n"
+                                "4. Return to this app once done."
+                            )
+
+                        self.root.after(0, copy_and_alert)
+
+                        # Still attempt to open Chrome directly as a convenient shortcut
+                        chrome_paths = [
+                            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+                        ]
+                        for path in chrome_paths:
+                            if os.path.isfile(path):
+                                try:
+                                    subprocess.Popen([path, url])
+                                    return True
+                                except Exception:
+                                    pass
+
+                        for name in ("google-chrome", "chrome"):
+                            try:
+                                browser = webbrowser.get(name)
+                                browser.open(url, new=new, autoraise=autoraise)
+                                return True
+                            except Exception:
+                                continue
+
+                        try:
+                            original_open(url, new=new, autoraise=autoraise)
+                        except Exception:
+                            pass
+                        return True
+
+                    webbrowser.open = custom_open
+                    try:
+                        creds = flow.run_local_server(port=0, prompt="consent", access_type="offline")
+                    finally:
+                        webbrowser.open = original_open
+
+                with open(token_path, "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
+
+            self.root.after(0, lambda: self.set_status("Verifying connection with YouTube..."))
+            youtube = build("youtube", "v3", credentials=creds)
+            request = youtube.channels().list(
+                part="snippet",
+                mine=True
+            )
+            response = request.execute()
+
+            channel_name = "Unknown Channel"
+            if response.get("items"):
+                channel_name = response["items"][0]["snippet"]["title"]
+
+            self.root.after(0, lambda: self._youtube_connect_success(channel_name))
+        except Exception as exc:
+            self.root.after(0, lambda: self._youtube_connect_failed(str(exc)))
+
+    def _youtube_connect_success(self, channel_name: str) -> None:
+        self.connect_yt_btn.configure(state=tk.NORMAL)
+        self.channel_name_lbl.configure(text=f"Connected: {channel_name}")
+        self.set_status(f"Connected to YouTube channel: {channel_name}")
+        self.update_youtube_buttons_visibility()
+        messagebox.showinfo("YouTube Connected", f"Successfully connected to YouTube channel:\n{channel_name}")
+
+    def _youtube_connect_failed(self, error_msg: str) -> None:
+        self.connect_yt_btn.configure(state=tk.NORMAL)
+        self.set_status("YouTube connection failed.", error=True)
+        messagebox.showerror("YouTube Connection Error", error_msg)
+
+    def import_client_secrets(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select client_secrets.json File",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+
+            if "installed" not in data and "web" not in data:
+                raise ValueError("Selected file does not appear to be a valid Google OAuth Client Secrets file.")
+
+            dest_path = APP_DIR / "client_secrets.json"
+            shutil.copy(path, dest_path)
+
+            self.set_status("OAuth client secrets imported successfully.")
+            self.update_youtube_buttons_visibility()
+            messagebox.showinfo("Import Success", f"Successfully imported client secrets to:\n{dest_path}")
+        except Exception as exc:
+            messagebox.showerror("Import Error", f"Failed to import secrets: {exc}")
+
+    def disconnect_youtube(self) -> None:
+        token_path = APP_DIR / "token.json"
+        if token_path.exists():
+            try:
+                os.remove(token_path)
+            except Exception as exc:
+                messagebox.showerror("Error", f"Failed to remove token file: {exc}")
+                return
+
+        self.connect_yt_btn.configure(text="Connect YouTube")
+        self.set_status("YouTube channel disconnected.")
+        self.update_youtube_buttons_visibility()
+        messagebox.showinfo("Disconnected", "Successfully disconnected your YouTube channel.")
+
+    def _start_time_update_loop(self) -> None:
+        def update_loop():
+            try:
+                self.refresh_upload_schedule_ui()
+            except Exception:
+                pass
+            self.root.after(5000, update_loop)
+        update_loop()
+
+    def _check_existing_youtube_auth(self) -> None:
+        token_path = APP_DIR / "token.json"
+        if token_path.exists():
+            threading.Thread(target=self._query_channel_name_silent, daemon=True).start()
+        self.refresh_upload_schedule_ui()
+        self.update_youtube_buttons_visibility()
+        self._start_time_update_loop()
+
+    def _query_channel_name_silent(self) -> None:
+        token_path = APP_DIR / "token.json"
+        try:
+            creds = Credentials.from_authorized_user_file(str(token_path), ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly"])
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                with open(token_path, "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
+
+            youtube = build("youtube", "v3", credentials=creds)
+            request = youtube.channels().list(
+                part="snippet",
+                mine=True
+            )
+            response = request.execute()
+            if response.get("items"):
+                channel_name = response["items"][0]["snippet"]["title"]
+                self.root.after(0, lambda: self.connect_yt_btn.configure(text=f"Connected: {channel_name}"))
+                self.root.after(0, self.update_youtube_buttons_visibility)
+        except Exception:
+            # Do NOT delete token.json automatically (e.g. if the user is simply offline during startup).
+            # We still call update_youtube_buttons_visibility() to hide the connect buttons, assuming we are connected.
+            self.root.after(0, self.update_youtube_buttons_visibility)
+
+    def youtube_upload_start(self) -> None:
+        if not HAS_GOOGLE_API:
+            messagebox.showerror(
+                "Libraries Missing",
+                "Google API libraries are not installed or failed to load.\n\n"
+                "Please run: pip install google-api-python-client google-auth-oauthlib google-auth-httplib2"
+            )
+            return
+
+        video_path = self.upload_video_var.get().strip()
+        if not video_path:
+            messagebox.showerror("Upload Error", "Please select or export a video file first.")
+            return
+        if not Path(video_path).is_file():
+            messagebox.showerror("Upload Error", f"Video file not found:\n{video_path}")
+            return
+
+        token_path = APP_DIR / "token.json"
+        if not token_path.exists():
+            messagebox.showerror("Upload Error", "You must connect to YouTube first. Click 'Connect YouTube'.")
+            return
+
+        title = self.upload_title_var.get().strip()
+        if not title:
+            messagebox.showerror("Upload Error", "Please enter a title for the video.")
+            return
+
+        self.current_upload_title = title
+
+        # Auto schedule calculation:
+        now = datetime.now(timezone.utc)
+        target_time = now
+        is_scheduled = False
+
+        if self.upload_queue_var.get() and self.settings.last_upload_time:
+            try:
+                from datetime import timedelta
+                last_time = datetime.fromisoformat(self.settings.last_upload_time.replace("Z", "+00:00"))
+                if last_time + timedelta(hours=6) >= now:
+                    target_time = last_time + timedelta(hours=6)
+                    is_scheduled = True
+            except Exception:
+                pass
+
+        target_time_str = target_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.settings.last_upload_time = target_time_str
+        self._save_current_editor_state()
+
+        # Instantly update UI fields with current local timezone representation
+        self.refresh_upload_schedule_ui()
+
+        if is_scheduled:
+            schedule_param = target_time_str
+        else:
+            schedule_param = ""
+
+        privacy = self.upload_privacy_var.get().strip() or "private"
+
+        self.upload_btn.configure(state=tk.DISABLED)
+        self.progress.grid()
+        self.progress.configure(mode="determinate", value=0)
+        self.set_status("Preparing video upload...")
+
+        threading.Thread(
+            target=self._run_youtube_upload,
+            args=(video_path, title, privacy, schedule_param),
+            daemon=True
+        ).start()
+
+    def _run_youtube_upload(self, video_path: str, title: str, privacy: str, schedule_utc_str: str) -> None:
+        try:
+            token_path = APP_DIR / "token.json"
+            creds = Credentials.from_authorized_user_file(str(token_path), ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly"])
+
+            if creds and creds.expired and creds.refresh_token:
+                self.root.after(0, lambda: self.set_status("Refreshing credentials..."))
+                creds.refresh(Request())
+                with open(token_path, "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
+
+            youtube = build("youtube", "v3", credentials=creds)
+            description = self.upload_description_text.get("1.0", "end-1c").strip()
+
+            tags_raw = self.upload_tags_var.get().strip()
+            tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+
+            body = {
+                "snippet": {
+                    "title": title,
+                    "description": description,
+                    "tags": tags,
+                    "categoryId": "17",
+                },
+                "status": {
+                    "privacyStatus": privacy
+                }
+            }
+
+            if schedule_utc_str:
+                body["status"]["publishAt"] = schedule_utc_str
+                body["status"]["privacyStatus"] = "private"
+                local_time = datetime.fromisoformat(schedule_utc_str.replace("Z", "+00:00")).astimezone()
+                local_time_str = local_time.strftime("%Y-%m-%d %H:%M")
+                self.root.after(0, lambda: self.set_status(f"Scheduling video for {local_time_str}..."))
+            else:
+                self.root.after(0, lambda: self.set_status("Uploading video to YouTube..."))
+
+            media = MediaFileUpload(
+                video_path,
+                mimetype="video/mp4",
+                chunksize=1024 * 1024,
+                resumable=True
+            )
+
+            request = youtube.videos().insert(
+                part="snippet,status",
+                body=body,
+                media_body=media
+            )
+
+            response = None
+            while response is None:
+                status, response = request.next_chunk()
+                if status:
+                    percent = int(status.progress() * 100)
+                    self.root.after(0, lambda p=percent: self._upload_progress_update(p))
+
+            video_id = response.get("id", "Unknown")
+            self.root.after(0, lambda vid=video_id: self._youtube_upload_success(vid))
+
+        except Exception as exc:
+            self.root.after(0, lambda: self._youtube_upload_failed(str(exc)))
+
+    def _upload_progress_update(self, percent: int) -> None:
+        self.progress.configure(value=percent)
+        self.set_status(f"Uploading video... {percent}% complete")
+
+    def _youtube_upload_success(self, video_id: str) -> None:
+        self.progress.stop()
+        self.progress.grid_remove()
+        self.upload_btn.configure(state=tk.NORMAL)
+        self.set_status("Video uploaded successfully!")
+
+        # Save last upload title persistently
+        self.settings.last_upload_title = getattr(self, "current_upload_title", "")
+        self._save_current_editor_state()
+        self.refresh_upload_history_ui()
+
+        url = f"https://youtu.be/{video_id}"
+        msg = f"Video successfully uploaded to YouTube!\n\nVideo ID: {video_id}\nURL: {url}\n\nNote: If scheduled, it will become public at the specified time."
+        messagebox.showinfo("Upload Success", msg)
+
+    def _youtube_upload_failed(self, error_msg: str) -> None:
+        self.progress.stop()
+        self.progress.grid_remove()
+        self.upload_btn.configure(state=tk.NORMAL)
+        self.set_status("YouTube upload failed.", error=True)
+        messagebox.showerror("YouTube Upload Error", error_msg)
 
     def _create_auto_text(self, parent: tk.Misc, *, height: int = 4) -> tk.Text:
         widget = tk.Text(
@@ -1868,7 +2464,9 @@ class VideoEditorApp:
 
     def _metadata_generation_success(self, raw_text: str) -> None:
         parsed = parse_metadata_response(raw_text)
-        self.generated_video_text_var.set(normalize_video_text(parsed.get("video_text", "")))
+        self.generated_video_text_text.delete("1.0", tk.END)
+        self.generated_video_text_text.insert("1.0", normalize_video_text(parsed.get("video_text", "")))
+        self.generated_video_text_text.event_generate("<KeyRelease>")
         self.ai_title_var.set(parsed.get("title", "").strip())
         self.ai_description_text.delete("1.0", tk.END)
         self.ai_description_text.insert("1.0", parsed.get("description", "").strip())
@@ -1883,7 +2481,7 @@ class VideoEditorApp:
         messagebox.showerror("GPT Error", message[:2000])
 
     def apply_generated_video_text(self) -> None:
-        text = normalize_video_text(self.generated_video_text_var.get())
+        text = normalize_video_text(self.generated_video_text_text.get("1.0", "end-1c"))
         if not text:
             messagebox.showinfo("Video Text", "Generate or type video top text first.")
             return
@@ -1901,7 +2499,9 @@ class VideoEditorApp:
             apply_color_to_range(widget, "1.0", first_end, title_overlay.first_line_color)
         self._suspend_save = False
         self._save_overlay_text_from_widget("title")
-        self.generated_video_text_var.set(text.replace("\n", " | "))
+        self.generated_video_text_text.delete("1.0", tk.END)
+        self.generated_video_text_text.insert("1.0", text)
+        self.generated_video_text_text.event_generate("<KeyRelease>")
         self._finish_edit()
         self._render_preview()
         self.set_status("Video top text updated.")
@@ -2341,8 +2941,11 @@ class VideoEditorApp:
             bg=THEME["preview_bg"],
             highlightthickness=1,
             highlightbackground=THEME["border"],
+            width=self.preview_display_w,
+            height=self.preview_display_h,
         )
         self.preview_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 6))
+        self.preview_wrap.pack_propagate(False)
         self.preview_wrap.bind("<Configure>", self._on_preview_wrap_configure)
         self.preview_canvas = tk.Canvas(
             self.preview_wrap,
@@ -2707,7 +3310,6 @@ class VideoEditorApp:
             self.end_sound_path_var,
             self.end_sound_start_var,
             self.openai_model_var,
-            self.generated_video_text_var,
             self.ai_title_var,
             self.ai_tags_var,
         ]
@@ -2775,11 +3377,21 @@ class VideoEditorApp:
         self.metadata_system_prompt_text.insert("1.0", s.metadata_system_prompt)
         self.metadata_user_prompt_text.delete("1.0", tk.END)
         self.metadata_user_prompt_text.insert("1.0", s.metadata_user_prompt)
-        self.generated_video_text_var.set(s.generated_video_text.replace("\n", " | "))
+        self.generated_video_text_text.delete("1.0", tk.END)
+        self.generated_video_text_text.insert("1.0", s.generated_video_text)
+        self.generated_video_text_text.event_generate("<KeyRelease>")
         self.ai_title_var.set(s.generated_title)
         self.ai_description_text.delete("1.0", tk.END)
         self.ai_description_text.insert("1.0", s.generated_description)
         self.ai_tags_var.set(s.generated_tags)
+        self.upload_title_var.set(s.upload_title)
+        self.upload_description_text.delete("1.0", tk.END)
+        self.upload_description_text.insert("1.0", s.upload_description)
+        self.upload_tags_var.set(s.upload_tags)
+        self.upload_queue_var.set(s.upload_queue)
+        if HAS_GOOGLE_API:
+            self.refresh_upload_schedule_ui()
+            self.refresh_upload_history_ui()
         self._sync_zoom_slider(s.video_scale)
         self._suspend_zoom_sync = False
         self._suspend_overlay_switch = False
@@ -2851,11 +3463,17 @@ class VideoEditorApp:
             openai_model=self.openai_model_var.get().strip() or "gpt-5.5",
             metadata_system_prompt=self.metadata_system_prompt_text.get("1.0", "end-1c").strip(),
             metadata_user_prompt=self.metadata_user_prompt_text.get("1.0", "end-1c").strip(),
-            generated_video_text=normalize_video_text(self.generated_video_text_var.get()),
+            generated_video_text=normalize_video_text(self.generated_video_text_text.get("1.0", "end-1c")),
             generated_title=self.ai_title_var.get().strip(),
             generated_description=self.ai_description_text.get("1.0", "end-1c").strip(),
             generated_tags=self.ai_tags_var.get().strip(),
             last_preset=self.settings.last_preset,
+            last_upload_time=self.settings.last_upload_time,
+            upload_title=self.upload_title_var.get().strip(),
+            upload_description=self.upload_description_text.get("1.0", "end-1c").strip(),
+            upload_tags=self.upload_tags_var.get().strip(),
+            upload_queue=bool(self.upload_queue_var.get()),
+            last_upload_title=self.settings.last_upload_title,
         )
 
     def _save_current_editor_state(self) -> None:
@@ -3582,6 +4200,7 @@ class VideoEditorApp:
         self.progress.grid_remove()
         self._save_current_editor_state()
         self.set_status(f"Export complete: {out_path}")
+        self.upload_video_var.set(str(out_path))
         messagebox.showinfo("Export Complete", f"Video saved to:\n{out_path}")
 
     def _export_failed(self, message: str) -> None:

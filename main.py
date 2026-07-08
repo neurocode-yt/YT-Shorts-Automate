@@ -166,6 +166,7 @@ class EditorSettings:
     upload_tags: str = ""
     upload_queue: bool = True
     last_upload_title: str = ""
+    export_counts: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.output_folder:
@@ -3474,6 +3475,7 @@ class VideoEditorApp:
             upload_tags=self.upload_tags_var.get().strip(),
             upload_queue=bool(self.upload_queue_var.get()),
             last_upload_title=self.settings.last_upload_title,
+            export_counts=getattr(self.settings, "export_counts", {}),
         )
 
     def _save_current_editor_state(self) -> None:
@@ -4148,12 +4150,72 @@ class VideoEditorApp:
         self.settings_manager.save(self.settings)
         self.set_status("Settings reset to defaults.")
 
+    def auto_assign_export_filename(self) -> None:
+        # Find heading from title overlay
+        heading = ""
+        for overlay in self.settings.text_overlays:
+            if isinstance(overlay, dict) and overlay.get("id") == "title":
+                heading = overlay.get("text", "")
+                break
+            elif hasattr(overlay, "id") and overlay.id == "title":
+                heading = overlay.text
+                break
+                
+        # Fallback to generated video text text widget if heading is empty
+        if not heading:
+            try:
+                heading = self.generated_video_text_text.get("1.0", "end-1c").strip()
+            except Exception:
+                pass
+
+        # Split and clean the heading (combine first and second lines)
+        if heading:
+            lines = [line.strip() for line in heading.splitlines() if line.strip()]
+            if len(lines) >= 2:
+                heading = f"{lines[0]} {lines[1]}"
+            elif len(lines) == 1:
+                heading = lines[0]
+            else:
+                heading = ""
+        
+        # Clean invalid filename characters
+        if heading:
+            heading = re.sub(r'[\\/*?:"<>|]', "", heading).strip()
+            
+        if not heading:
+            heading = "shorts_output"
+            output_filename = "shorts_output"
+        else:
+            if not hasattr(self.settings, "export_counts") or self.settings.export_counts is None:
+                self.settings.export_counts = {}
+                
+            std_heading = heading.strip()
+            match_key = std_heading.lower()
+            
+            count = None
+            for key, val in self.settings.export_counts.items():
+                if key.lower() == match_key:
+                    count = val
+                    std_heading = key
+                    break
+                    
+            if count is None:
+                max_count = max(self.settings.export_counts.values()) if self.settings.export_counts else 0
+                count = max_count + 1
+                self.settings.export_counts[std_heading] = count
+                
+            output_filename = f"s {count} {std_heading}"
+            
+        self.output_filename_var.set(output_filename)
+        self.settings.output_filename = output_filename
+
     def start_export(self) -> None:
         if self.export_thread and self.export_thread.is_alive():
             messagebox.showinfo("Export", "An export is already running.")
             return
 
         self.stop_playback()
+        self.auto_assign_export_filename()
         self._save_current_editor_state()
 
         try:

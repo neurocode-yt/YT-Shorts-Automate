@@ -55,6 +55,8 @@ SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv"}
 REPEAT_DISSOLVE_SECONDS = 0.5
 OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
 VOICEOVER_SPEED = 1.30
+VOICEOVER_VOLUME = 1.50
+CLAP_VOLUME = 1.56
 OPENAI_TTS_VOICES = [
     "cedar",
     "marin",
@@ -1017,7 +1019,7 @@ def build_end_sound_audio_filter(
     base_audio_label: str | None = "0:a",
     output_duration: float = 0.0,
 ) -> str:
-    delayed = f"[{sound_input_index}:a]adelay={audio_delay_ms}|{audio_delay_ms},volume=1.30"
+    delayed = f"[{sound_input_index}:a]adelay={audio_delay_ms}|{audio_delay_ms},volume={CLAP_VOLUME:.2f}"
     if base_audio_label:
         return (
             f"{delayed}[clap];"
@@ -1395,9 +1397,9 @@ class FFmpegBuilder:
             cmd.extend(["-i", s.end_sound_path])
         external_audio_tracks: list[tuple[int, str, int, float]] = []
         if use_voiceover:
-            external_audio_tracks.append((voiceover_input_index, "voiceover", 0, 1.0))
+            external_audio_tracks.append((voiceover_input_index, "voiceover", 0, VOICEOVER_VOLUME))
         if use_end_sound:
-            external_audio_tracks.append((end_sound_input_index, "clap", audio_delay_ms, 1.30))
+            external_audio_tracks.append((end_sound_input_index, "clap", audio_delay_ms, CLAP_VOLUME))
 
         if use_repeat:
             include_audio = video_has_audio_stream(s.video_path, ffmpeg)

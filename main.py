@@ -54,6 +54,7 @@ DEFAULT_CLAP_SOUND = ""
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv"}
 REPEAT_DISSOLVE_SECONDS = 0.5
 OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
+VOICEOVER_SPEED = 1.30
 OPENAI_TTS_VOICES = [
     "cedar",
     "marin",
@@ -1266,6 +1267,7 @@ def call_openai_tts(
         "model": model or OPENAI_TTS_MODEL,
         "voice": voice,
         "input": text[:4096],
+        "speed": VOICEOVER_SPEED,
         "instructions": (
             "Speak like an energetic YouTube Shorts sports narrator. "
             "Keep it punchy, excited, dramatic, and clear."

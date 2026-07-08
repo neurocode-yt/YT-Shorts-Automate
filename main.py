@@ -1233,6 +1233,9 @@ class VideoEditorApp:
         self._drag_overlay_id: str | None = None
         self._drag_origin_font_size = 72
         self._drag_origin_rect_h = 1
+        self._active_section = "video"
+        self._section_frames: dict[str, ttk.Frame] = {}
+        self._section_buttons: dict[str, ttk.Button] = {}
 
         self._build_style()
         self._build_ui()
@@ -1406,12 +1409,12 @@ class VideoEditorApp:
         container = ttk.Frame(self.root, padding=16)
         container.pack(fill=tk.BOTH, expand=True)
 
-        footer = ttk.Frame(container)
-        footer.pack(side=tk.BOTTOM, fill=tk.X)
-        footer.columnconfigure(1, weight=1)
+        self.footer = ttk.Frame(container)
+        self.footer.pack(side=tk.BOTTOM, fill=tk.X)
+        self.footer.columnconfigure(1, weight=1)
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(
-            footer,
+            self.footer,
             textvariable=self.status_var,
             style="Muted.TLabel",
             wraplength=760,
@@ -1421,10 +1424,10 @@ class VideoEditorApp:
             "<Configure>",
             lambda event: self.status_label.configure(wraplength=max(360, event.width - 4)),
         )
-        self.progress = ttk.Progressbar(footer, mode="indeterminate")
+        self.progress = ttk.Progressbar(self.footer, mode="indeterminate")
         self.progress.grid(row=1, column=0, columnspan=3, sticky=tk.EW, pady=(6, 0))
         self.progress.grid_remove()
-        actions = ttk.Frame(footer)
+        actions = ttk.Frame(self.footer)
         actions.grid(row=0, column=0, sticky=tk.W)
         actions.columnconfigure(1, weight=1)
         preset_row = ttk.Frame(actions)
@@ -1439,15 +1442,41 @@ class VideoEditorApp:
         redo_btn.pack(side=tk.LEFT)
         self._create_tooltip(redo_btn, f"Redo undone change (Ctrl+Y, up to {UNDO_LIMIT} steps)")
         self.export_btn = ttk.Button(
-            footer,
+            self.footer,
             text="Export Video",
             command=self.start_export,
             style="Accent.TButton",
         )
         self.export_btn.grid(row=0, column=2, sticky=tk.E)
 
-        header = ttk.Frame(container)
-        header.pack(side=tk.TOP, fill=tk.X, pady=(0, 10))
+        nav = ttk.Frame(container)
+        nav.pack(side=tk.TOP, fill=tk.X, pady=(0, 10))
+        nav.columnconfigure(3, weight=1)
+        for col, (section_id, label) in enumerate(
+            (
+                ("video", "Video Editing"),
+                ("description", "Description"),
+                ("upload", "Upload to YouTube"),
+            )
+        ):
+            btn = ttk.Button(nav, text=label, command=lambda sid=section_id: self._show_section(sid))
+            btn.grid(row=0, column=col, sticky=tk.W, padx=(0 if col == 0 else 8, 0))
+            self._section_buttons[section_id] = btn
+
+        section_host = ttk.Frame(container)
+        section_host.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        video_section = ttk.Frame(section_host)
+        description_section = ttk.Frame(section_host)
+        upload_section = ttk.Frame(section_host)
+        self._section_frames = {
+            "video": video_section,
+            "description": description_section,
+            "upload": upload_section,
+        }
+
+        header = ttk.Frame(video_section)
+        # Header title text is intentionally hidden; top-level section buttons own this area.
         header.columnconfigure(0, weight=1)
         title_col = ttk.Frame(header)
         title_col.grid(row=0, column=0, sticky=tk.EW)
@@ -1464,7 +1493,7 @@ class VideoEditorApp:
             lambda event: self.subtitle_label.configure(wraplength=max(320, event.width - 4)),
         )
 
-        body = ttk.Panedwindow(container, orient=tk.HORIZONTAL)
+        body = ttk.Panedwindow(video_section, orient=tk.HORIZONTAL)
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         left_outer = ttk.Frame(body)
@@ -1544,8 +1573,116 @@ class VideoEditorApp:
         self._build_export_tab(self._wrap_tab_page(export_tab))
 
         self._build_preview_panel(right)
+        self._build_description_section(description_section)
+        self._build_upload_section(upload_section)
+        self._show_section("video")
 
         self.preview_var = tk.StringVar(value="")
+
+    def _show_section(self, section_id: str) -> None:
+        if section_id not in self._section_frames:
+            section_id = "video"
+        self._active_section = section_id
+        for frame in self._section_frames.values():
+            frame.pack_forget()
+        self._section_frames[section_id].pack(fill=tk.BOTH, expand=True)
+
+        if section_id == "video":
+            self.footer.pack(side=tk.BOTTOM, fill=tk.X)
+        else:
+            self.footer.pack_forget()
+
+        for sid, btn in self._section_buttons.items():
+            btn.configure(style="Accent.TButton" if sid == section_id else "TButton")
+
+    def _build_description_section(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(parent)
+        top.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
+        top.columnconfigure(0, weight=1)
+
+        title_box = ttk.LabelFrame(top, text="  Title  ", padding=10, style="Card.TLabelframe")
+        title_box.grid(row=0, column=0, sticky=tk.EW)
+        self.ai_title_var = tk.StringVar()
+        ttk.Entry(title_box, textvariable=self.ai_title_var).pack(fill=tk.X, ipady=4)
+
+        content = ttk.Frame(parent)
+        content.grid(row=1, column=0, sticky=tk.NSEW)
+        content.columnconfigure(0, weight=2)
+        content.columnconfigure(1, weight=1)
+        content.rowconfigure(0, weight=1)
+
+        desc_box = ttk.LabelFrame(content, text="  Description  ", padding=10, style="Card.TLabelframe")
+        desc_box.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 8))
+        self.ai_description_text = scrolledtext.ScrolledText(
+            desc_box,
+            wrap=tk.WORD,
+            font=("Segoe UI", 11),
+            bg=THEME["surface2"],
+            fg=THEME["text"],
+            insertbackground=THEME["accent"],
+            relief=tk.SOLID,
+            bd=1,
+            padx=8,
+            pady=8,
+        )
+        self.ai_description_text.pack(fill=tk.BOTH, expand=True)
+
+        tags_box = ttk.LabelFrame(content, text="  Tags  ", padding=10, style="Card.TLabelframe")
+        tags_box.grid(row=0, column=1, sticky=tk.NSEW)
+        self.ai_tags_text = scrolledtext.ScrolledText(
+            tags_box,
+            wrap=tk.WORD,
+            font=("Segoe UI", 11),
+            bg=THEME["surface2"],
+            fg=THEME["text"],
+            insertbackground=THEME["accent"],
+            relief=tk.SOLID,
+            bd=1,
+            padx=8,
+            pady=8,
+        )
+        self.ai_tags_text.pack(fill=tk.BOTH, expand=True)
+
+        actions = ttk.Frame(parent)
+        actions.grid(row=2, column=0, sticky=tk.EW, pady=(10, 0))
+        ttk.Button(actions, text="Generate Metadata").pack(side=tk.LEFT)
+        ttk.Button(actions, text="Save Metadata").pack(side=tk.LEFT, padx=(8, 0))
+
+    def _build_upload_section(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+
+        video_box = ttk.LabelFrame(parent, text="  Video File  ", padding=10, style="Card.TLabelframe")
+        video_box.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
+        video_box.columnconfigure(0, weight=1)
+        self.upload_video_var = tk.StringVar()
+        ttk.Entry(video_box, textvariable=self.upload_video_var).grid(row=0, column=0, sticky=tk.EW, ipady=4)
+        ttk.Button(video_box, text="Browse").grid(row=0, column=1, padx=(8, 0))
+
+        schedule_box = ttk.LabelFrame(parent, text="  Schedule  ", padding=10, style="Card.TLabelframe")
+        schedule_box.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
+        schedule_box.columnconfigure(1, weight=1)
+        self.upload_privacy_var = tk.StringVar(value="private")
+        self.upload_date_var = tk.StringVar()
+        self.upload_time_var = tk.StringVar()
+        ttk.Label(schedule_box, text="Privacy", style="CardMuted.TLabel").grid(row=0, column=0, sticky=tk.W)
+        ttk.Combobox(
+            schedule_box,
+            textvariable=self.upload_privacy_var,
+            values=["private", "unlisted", "public"],
+            state="readonly",
+        ).grid(row=0, column=1, sticky=tk.EW, padx=(8, 0))
+        ttk.Label(schedule_box, text="Date", style="CardMuted.TLabel").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Entry(schedule_box, textvariable=self.upload_date_var).grid(row=1, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
+        ttk.Label(schedule_box, text="Time", style="CardMuted.TLabel").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Entry(schedule_box, textvariable=self.upload_time_var).grid(row=2, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
+
+        actions = ttk.Frame(parent)
+        actions.grid(row=2, column=0, sticky=tk.EW)
+        ttk.Button(actions, text="Connect YouTube").pack(side=tk.LEFT)
+        ttk.Button(actions, text="Upload / Schedule", style="Accent.TButton").pack(side=tk.LEFT, padx=(8, 0))
 
     def _grid_field_box(
         self, parent: ttk.Frame, title: str, row: int, column: int, columnspan: int = 1

@@ -1,0 +1,28 @@
+{
+  "name": "Snooker Highlight Style",
+  "settings": {
+    "text": "",
+    "background_color": "#0B1F14",
+    "video_position": "center",
+    "video_custom_y": 80,
+    "video_scale": 1.05,
+    "crop_mode": false,
+    "text_position": "top",
+    "text_custom_x": 0,
+    "text_custom_y": 100,
+    "font_size": 80,
+    "font_color": "#F5E96B",
+    "font_path": "C:\\Windows\\Fonts\\arialbd.ttf",
+    "text_box_enabled": true,
+    "text_box_color": "#000000",
+    "text_box_opacity": 0.55,
+    "text_shadow_enabled": true,
+    "text_outline_enabled": true,
+    "outline_color": "#000000",
+    "outline_size": 5,
+    "output_folder": "",
+    "output_filename": "snooker_highlight",
+    "export_quality": "balanced",
+    "last_preset": "Snooker Highlight Style"
+  }
+}

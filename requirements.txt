@@ -1,0 +1,5 @@
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# Tkinter is included with standard Python on Windows.
+# FFmpeg must be installed separately and available on PATH.

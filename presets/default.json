@@ -1,0 +1,28 @@
+{
+  "name": "YouTube Shorts Default",
+  "settings": {
+    "text": "",
+    "background_color": "#000000",
+    "video_position": "center",
+    "video_custom_y": 0,
+    "video_scale": 1.0,
+    "crop_mode": false,
+    "text_position": "top",
+    "text_custom_x": 0,
+    "text_custom_y": 120,
+    "font_size": 72,
+    "font_color": "#FFFFFF",
+    "font_path": "C:\\Windows\\Fonts\\arialbd.ttf",
+    "text_box_enabled": false,
+    "text_box_color": "#000000",
+    "text_box_opacity": 0.5,
+    "text_shadow_enabled": true,
+    "text_outline_enabled": true,
+    "outline_color": "#000000",
+    "outline_size": 4,
+    "output_folder": "",
+    "output_filename": "shorts_output",
+    "export_quality": "balanced",
+    "last_preset": "YouTube Shorts Default"
+  }
+}

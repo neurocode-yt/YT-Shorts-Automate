@@ -79,14 +79,6 @@ QUALITY_PRESETS = {
     "small": {"crf": "28", "preset": "fast", "label": "Smaller file (lower quality)"},
 }
 
-TEXT_CASE_OPTIONS = {
-    "none": "Normal",
-    "uppercase": "UPPERCASE",
-    "lowercase": "lowercase",
-    "title": "Title Case",
-    "sentence": "Sentence case",
-}
-
 THEME = {
     "bg": "#0f1117",
     "surface": "#171b23",
@@ -127,6 +119,8 @@ class TextOverlay:
     first_line_font_size: int = 92
     font_color: str = "#FFFFFF"
     font_path: str = DEFAULT_FONT
+    font_bold_enabled: bool = True
+    font_italic_enabled: bool = False
     text_box_enabled: bool = False
     text_box_color: str = "#000000"
     text_box_opacity: float = 0.5
@@ -157,6 +151,8 @@ class EditorSettings:
     first_line_font_size: int = 92
     font_color: str = "#FFFFFF"
     font_path: str = DEFAULT_FONT
+    font_bold_enabled: bool = True
+    font_italic_enabled: bool = False
     text_box_enabled: bool = False
     text_box_color: str = "#000000"
     text_box_opacity: float = 0.5
@@ -225,6 +221,12 @@ def overlay_from_dict(data: dict) -> TextOverlay:
     if "first_line_font_size" not in data:
         font_size = int(base.get("font_size", 72) or 72)
         base["first_line_font_size"] = max(font_size + 16, int(font_size * 1.25))
+    if "font_bold_enabled" not in data or "font_italic_enabled" not in data:
+        inferred_bold, inferred_italic = infer_font_style_from_path(base.get("font_path", DEFAULT_FONT))
+        if "font_bold_enabled" not in data:
+            base["font_bold_enabled"] = inferred_bold
+        if "font_italic_enabled" not in data:
+            base["font_italic_enabled"] = inferred_italic
     return TextOverlay(**{k: base[k] for k in asdict(default_title_overlay()).keys()})
 
 
@@ -249,6 +251,7 @@ def default_footer_overlay() -> TextOverlay:
         font_size=56,
         first_line_font_size=72,
         font_color="#FFFFFF",
+        font_bold_enabled=True,
         text_outline_enabled=True,
         outline_color="#000000",
         outline_size=3,
@@ -257,6 +260,75 @@ def default_footer_overlay() -> TextOverlay:
 
 def default_text_overlays() -> list[TextOverlay]:
     return [default_title_overlay(), default_footer_overlay()]
+
+
+FONT_STYLE_FILES = {
+    "arial": {
+        (False, False): "arial.ttf",
+        (True, False): "arialbd.ttf",
+        (False, True): "ariali.ttf",
+        (True, True): "arialbi.ttf",
+    },
+    "calibri": {
+        (False, False): "calibri.ttf",
+        (True, False): "calibrib.ttf",
+        (False, True): "calibrii.ttf",
+        (True, True): "calibriz.ttf",
+    },
+    "segoeui": {
+        (False, False): "segoeui.ttf",
+        (True, False): "segoeuib.ttf",
+        (False, True): "segoeuii.ttf",
+        (True, True): "segoeuiz.ttf",
+    },
+    "times": {
+        (False, False): "times.ttf",
+        (True, False): "timesbd.ttf",
+        (False, True): "timesi.ttf",
+        (True, True): "timesbi.ttf",
+    },
+    "verdana": {
+        (False, False): "verdana.ttf",
+        (True, False): "verdanab.ttf",
+        (False, True): "verdanai.ttf",
+        (True, True): "verdanaz.ttf",
+    },
+}
+
+
+def infer_font_style_from_path(font_path: str) -> tuple[bool, bool]:
+    stem = Path(font_path or DEFAULT_FONT).stem.lower()
+    for variants in FONT_STYLE_FILES.values():
+        for (bold, italic), filename in variants.items():
+            if stem == Path(filename).stem.lower():
+                return bold, italic
+    bold_markers = ("bd", "bold", "black", "heavy")
+    italic_markers = ("italic", "oblique")
+    return any(marker in stem for marker in bold_markers), any(marker in stem for marker in italic_markers)
+
+
+def resolve_styled_font_path(font_path: str, bold: bool, italic: bool) -> str:
+    source = Path(font_path or DEFAULT_FONT)
+    source_stem = source.stem.lower()
+    for variants in FONT_STYLE_FILES.values():
+        variant_stems = {Path(filename).stem.lower() for filename in variants.values()}
+        if source_stem not in variant_stems:
+            continue
+        target_name = variants.get((bool(bold), bool(italic)))
+        if target_name:
+            target = source.with_name(target_name)
+            if target.is_file():
+                return str(target)
+        break
+    return str(source)
+
+
+def styled_font_path_for_overlay(overlay: TextOverlay) -> str:
+    return resolve_styled_font_path(
+        overlay.font_path,
+        bool(getattr(overlay, "font_bold_enabled", True)),
+        bool(getattr(overlay, "font_italic_enabled", False)),
+    )
 
 
 def migrate_settings_dict(data: dict) -> dict:
@@ -283,6 +355,9 @@ def migrate_settings_dict(data: dict) -> dict:
     )
     title.font_color = data.get("font_color", "#FFFFFF") or "#FFFFFF"
     title.font_path = data.get("font_path", DEFAULT_FONT) or DEFAULT_FONT
+    inferred_bold, inferred_italic = infer_font_style_from_path(title.font_path)
+    title.font_bold_enabled = bool(data.get("font_bold_enabled", inferred_bold))
+    title.font_italic_enabled = bool(data.get("font_italic_enabled", inferred_italic))
     title.text_box_enabled = bool(data.get("text_box_enabled", False))
     title.text_box_color = data.get("text_box_color", "#000000") or "#000000"
     title.text_box_opacity = float(data.get("text_box_opacity", 0.5) or 0.5)
@@ -299,27 +374,6 @@ def get_text_overlays(settings: EditorSettings) -> list[TextOverlay]:
     if settings.text_overlays:
         return [overlay_from_dict(item) for item in settings.text_overlays]
     return default_text_overlays()
-
-
-def apply_text_case(text: str, case: str) -> str:
-    if not text or case == "none":
-        return text
-    if case == "uppercase":
-        return text.upper()
-    if case == "lowercase":
-        return text.lower()
-    if case == "title":
-        return text.title()
-    if case == "sentence":
-        lines: list[str] = []
-        for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-            stripped = line.strip()
-            if not stripped:
-                lines.append(line)
-                continue
-            lines.append(stripped[0].upper() + stripped[1:].lower() if len(stripped) > 1 else stripped.upper())
-        return "\n".join(lines)
-    return text
 
 
 @dataclass
@@ -454,7 +508,7 @@ def spans_to_lines(spans: list[TextSpan]) -> list[list[TextSpan]]:
 
 
 def load_font_for_overlay(overlay: TextOverlay) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    return load_font(overlay.font_path, overlay.font_size)
+    return load_font(styled_font_path_for_overlay(overlay), overlay.font_size)
 
 
 def load_font(font_path: str, font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -470,10 +524,7 @@ def layout_colored_text(
     if not spans:
         return [], None
 
-    processed = [
-        TextSpan(apply_text_case(span.text, overlay.text_case), normalize_hex_color(span.color))
-        for span in spans
-    ]
+    processed = [TextSpan(span.text, normalize_hex_color(span.color)) for span in spans]
     lines = spans_to_lines(processed)
     if not lines:
         return [], None
@@ -489,7 +540,7 @@ def layout_colored_text(
 
     for line_index, line in enumerate(lines):
         line_font_size = first_size if line_index == 0 else normal_size
-        font = load_font(overlay.font_path, line_font_size)
+        font = load_font(styled_font_path_for_overlay(overlay), line_font_size)
         parts: list[tuple[str, int, str, int]] = []
         width = 0
         height = 0
@@ -548,7 +599,7 @@ def build_colored_drawtext_filters(overlay: TextOverlay, spans: list[TextSpan]) 
     if not items:
         return []
 
-    font = escape_filter_path(overlay.font_path)
+    font = escape_filter_path(styled_font_path_for_overlay(overlay))
     filters: list[str] = []
     for item in items:
         if not item.text:
@@ -1322,7 +1373,8 @@ class FFmpegBuilder:
                 f"Supported formats: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
             )
         for overlay in get_text_overlays(s):
-            if not overlay.font_path or not Path(overlay.font_path).is_file():
+            styled_font = styled_font_path_for_overlay(overlay)
+            if not styled_font or not Path(styled_font).is_file():
                 raise ValueError(
                     f"Invalid font file for {overlay.label}.\n"
                     "Select a valid .ttf or .otf font from your system."
@@ -1610,7 +1662,7 @@ class PreviewCompositor:
             stroke_fill = hex_to_rgb(overlay.outline_color) if overlay.text_outline_enabled else None
 
             for item in items:
-                font = load_font(overlay.font_path, item.font_size)
+                font = load_font(styled_font_path_for_overlay(overlay), item.font_size)
                 fill = hex_to_rgb(item.color)
                 if overlay.text_shadow_enabled:
                     draw.text((item.x + 3, item.y + 3), item.text, font=font, fill=(0, 0, 0))
@@ -3705,7 +3757,7 @@ class VideoEditorApp:
             except (TypeError, ValueError):
                 return default
 
-        overlay.text_case = self.text_case_var.get() or "none"
+        overlay.text_case = "none"
         overlay.first_line_color = self.first_line_color_var.get().strip() or "#FFD700"
         overlay.text_position = self.text_position_var.get() or "top"
         overlay.text_custom_x = parse_int(self.text_custom_x_var.get(), 0)
@@ -3717,6 +3769,8 @@ class VideoEditorApp:
         )
         overlay.font_color = self.font_color_var.get().strip() or "#FFFFFF"
         overlay.font_path = self.font_path_var.get().strip() or DEFAULT_FONT
+        overlay.font_bold_enabled = bool(self.text_bold_var.get())
+        overlay.font_italic_enabled = bool(self.text_italic_var.get())
         overlay.text_box_enabled = bool(self.text_box_var.get())
         overlay.text_box_color = self.text_box_color_var.get().strip() or "#000000"
         overlay.text_shadow_enabled = bool(self.text_shadow_var.get())
@@ -3748,6 +3802,8 @@ class VideoEditorApp:
         self.first_line_font_size_var.set(str(overlay.first_line_font_size))
         self.font_color_var.set(overlay.font_color)
         self.font_path_var.set(overlay.font_path)
+        self.text_bold_var.set(bool(getattr(overlay, "font_bold_enabled", True)))
+        self.text_italic_var.set(bool(getattr(overlay, "font_italic_enabled", False)))
         self.text_box_var.set(overlay.text_box_enabled)
         self.text_box_color_var.set(overlay.text_box_color)
         self.text_shadow_var.set(overlay.text_shadow_enabled)
@@ -3855,37 +3911,25 @@ class VideoEditorApp:
 
     def _build_text_format_toolbar(self, parent: ttk.Frame) -> None:
         self.text_case_var = tk.StringVar(value="none")
+        self.text_bold_var = tk.BooleanVar(value=True)
+        self.text_italic_var = tk.BooleanVar(value=False)
         btn_row = ttk.Frame(parent, style="Card.TFrame")
         btn_row.pack(fill=tk.X)
 
         format_buttons = [
-            ("AA", "uppercase", "UPPERCASE"),
-            ("aa", "lowercase", "lowercase"),
-            ("Aa", "title", "Title Case"),
-            ("Ab", "sentence", "Sentence"),
-            ("Abc", "none", "Normal"),
+            ("B", self.text_bold_var, "Bold"),
+            ("I", self.text_italic_var, "Italic"),
         ]
-        for col, (label, case, tooltip) in enumerate(format_buttons):
-            btn = ttk.Button(
+        for col, (label, variable, tooltip) in enumerate(format_buttons):
+            btn = ttk.Checkbutton(
                 btn_row,
                 text=label,
-                width=3,
-                style="Format.TButton",
-                command=lambda c=case: self._set_text_case(c),
+                variable=variable,
+                style="Toolbutton",
             )
-            btn.grid(row=0, column=col, padx=(0 if col == 0 else 2, 0), sticky=tk.EW)
+            btn.grid(row=0, column=col, padx=(0 if col == 0 else 4, 0), sticky=tk.EW)
             btn_row.columnconfigure(col, weight=1)
             self._create_tooltip(btn, tooltip)
-
-        case_row = ttk.Frame(parent, style="Card.TFrame")
-        case_row.pack(fill=tk.X, pady=(8, 0))
-        ttk.Label(case_row, text="Preset", style="CardMuted.TLabel").pack(side=tk.LEFT)
-        ttk.Combobox(
-            case_row,
-            textvariable=self.text_case_var,
-            values=list(TEXT_CASE_OPTIONS.keys()),
-            state="readonly",
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
 
     def _build_text_color_toolbar(self, parent: ttk.Frame) -> None:
         color_buttons = [
@@ -3919,18 +3963,6 @@ class VideoEditorApp:
 
         widget.bind("<Enter>", show)
         widget.bind("<Leave>", hide)
-
-    def _set_text_case(self, case: str) -> None:
-        self._push_undo_immediate()
-        self.text_case_var.set(case)
-        widget = self._active_text_widget()
-        spans = extract_text_spans(widget, self.font_color_var.get())
-        if spans and case != "none":
-            formatted_spans = [TextSpan(apply_text_case(span.text, case), span.color) for span in spans]
-            self._suspend_save = True
-            apply_spans_to_widget(widget, formatted_spans, self.font_color_var.get())
-            self._suspend_save = False
-        self._finish_edit()
 
     def _ask_color(self, title: str, initial: str) -> str | None:
         _, color = colorchooser.askcolor(color=initial or "#FFFFFF", title=title)
@@ -4308,13 +4340,21 @@ class VideoEditorApp:
         ).pack(anchor=tk.W, pady=(4, 0))
         row += 1
 
-        case_box = self._grid_field_box(parent, "Text Case", row, 0)
-        ttk.Combobox(
-            case_box,
-            textvariable=self.text_case_var,
-            values=list(TEXT_CASE_OPTIONS.keys()),
-            state="readonly",
-        ).pack(fill=tk.X)
+        style_box = self._grid_field_box(parent, "Text Style", row, 0)
+        style_row = ttk.Frame(style_box, style="Card.TFrame")
+        style_row.pack(fill=tk.X)
+        ttk.Checkbutton(
+            style_row,
+            text="Bold",
+            variable=self.text_bold_var,
+            style="Toolbutton",
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Checkbutton(
+            style_row,
+            text="Italic",
+            variable=self.text_italic_var,
+            style="Toolbutton",
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
 
         self.text_position_var = tk.StringVar()
         pos_box = self._grid_field_box(parent, "Text Position", row, 1)
@@ -4468,12 +4508,13 @@ class VideoEditorApp:
             self.end_sound_enabled_var,
             self.repeat_clip_twice_var,
             self.voiceover_enabled_var,
+            self.text_bold_var,
+            self.text_italic_var,
             self.text_box_var,
             self.text_shadow_var,
             self.text_outline_var,
         ):
             var.trace_add("write", lambda *_: self._on_settings_changed())
-        self.text_case_var.trace_add("write", lambda *_: self._on_settings_changed())
         for var in (self.selection_color_var, self.first_line_color_var):
             var.trace_add("write", lambda *_: self._on_settings_changed())
         self.root.bind("<Control-z>", lambda _e: self.undo_action())
@@ -4606,6 +4647,8 @@ class VideoEditorApp:
             first_line_font_size=title.first_line_font_size,
             font_color=title.font_color,
             font_path=title.font_path,
+            font_bold_enabled=title.font_bold_enabled,
+            font_italic_enabled=title.font_italic_enabled,
             text_box_enabled=title.text_box_enabled,
             text_box_color=title.text_box_color,
             text_shadow_enabled=title.text_shadow_enabled,

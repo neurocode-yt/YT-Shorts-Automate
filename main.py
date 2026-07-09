@@ -88,18 +88,22 @@ TEXT_CASE_OPTIONS = {
 }
 
 THEME = {
-    "bg": "#12141a",
-    "surface": "#1a1e26",
-    "surface2": "#242a35",
-    "border": "#343b48",
-    "text": "#eef0f4",
-    "text_muted": "#8b939f",
-    "accent": "#5b8def",
-    "accent_hover": "#7aa3f5",
-    "success": "#3dd68c",
-    "preview_bg": "#0a0b0e",
-    "video_outline": "#5b8def",
-    "text_outline": "#3dd68c",
+    "bg": "#0f1117",
+    "surface": "#171b23",
+    "surface2": "#222837",
+    "surface3": "#2b3344",
+    "border": "#323b4d",
+    "border_soft": "#252c39",
+    "text": "#f4f7fb",
+    "text_muted": "#9aa6b5",
+    "accent": "#6ea8fe",
+    "accent_hover": "#8bbaff",
+    "success": "#45d483",
+    "warning": "#f4c95d",
+    "danger": "#ff6b6b",
+    "preview_bg": "#07090d",
+    "video_outline": "#6ea8fe",
+    "text_outline": "#45d483",
 }
 
 
@@ -1735,8 +1739,8 @@ class VideoEditorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Shorts Maker")
-        self.root.minsize(1080, 720)
-        self.root.geometry("1440x900")
+        self.root.minsize(1180, 760)
+        self.root.geometry("1560x940")
 
         self.settings_manager = SettingsManager()
         self.settings = self.settings_manager.load()
@@ -1812,41 +1816,124 @@ class VideoEditorApp:
 
         style.configure(".", background=THEME["bg"], foreground=THEME["text"], font=("Segoe UI", 10))
         style.configure("TFrame", background=THEME["bg"])
+        style.configure("Shell.TFrame", background=THEME["bg"])
+        style.configure("Nav.TFrame", background=THEME["surface"])
+        style.configure("Footer.TFrame", background=THEME["surface"])
         style.configure("Card.TFrame", background=THEME["surface"])
+        style.configure("CardAlt.TFrame", background=THEME["surface2"])
+
         style.configure("TLabel", background=THEME["bg"], foreground=THEME["text"])
         style.configure("Card.TLabel", background=THEME["surface"], foreground=THEME["text"])
+        style.configure("CardAlt.TLabel", background=THEME["surface2"], foreground=THEME["text"])
         style.configure("Muted.TLabel", background=THEME["bg"], foreground=THEME["text_muted"], font=("Segoe UI", 9))
         style.configure("CardMuted.TLabel", background=THEME["surface"], foreground=THEME["text_muted"], font=("Segoe UI", 9))
-        style.configure("Title.TLabel", background=THEME["bg"], foreground=THEME["text"], font=("Segoe UI", 22, "bold"))
+        style.configure("FooterMuted.TLabel", background=THEME["surface"], foreground=THEME["text_muted"], font=("Segoe UI", 9))
+        style.configure("Title.TLabel", background=THEME["bg"], foreground=THEME["text"], font=("Segoe UI", 18, "bold"))
         style.configure("Subtitle.TLabel", background=THEME["bg"], foreground=THEME["text_muted"], font=("Segoe UI", 10))
+        style.configure("Brand.TLabel", background=THEME["surface"], foreground=THEME["text"], font=("Segoe UI", 12, "bold"))
+        style.configure("Pill.TLabel", background=THEME["surface2"], foreground=THEME["text_muted"], font=("Segoe UI", 9, "bold"), padding=(10, 4))
 
-        style.configure("TLabelframe", background=THEME["surface"], bordercolor=THEME["border"], relief="solid", borderwidth=1)
-        style.configure("TLabelframe.Label", background=THEME["surface"], foreground=THEME["accent"], font=("Segoe UI", 10, "bold"))
-        style.configure("Card.TLabelframe", background=THEME["surface"], bordercolor=THEME["border"], relief="solid", borderwidth=1)
-        style.configure("Card.TLabelframe.Label", background=THEME["surface"], foreground=THEME["accent"], font=("Segoe UI", 10, "bold"))
-        style.configure("Sub.TLabelframe", background=THEME["surface"], bordercolor=THEME["border"], relief="solid", borderwidth=1)
-        style.configure("Sub.TLabelframe.Label", background=THEME["surface"], foreground=THEME["text_muted"], font=("Segoe UI", 9, "bold"))
+        for style_name in ("TLabelframe", "Card.TLabelframe"):
+            style.configure(
+                style_name,
+                background=THEME["surface"],
+                bordercolor=THEME["border"],
+                relief="solid",
+                borderwidth=1,
+            )
+            style.configure(
+                f"{style_name}.Label",
+                background=THEME["surface"],
+                foreground=THEME["accent"],
+                font=("Segoe UI", 10, "bold"),
+            )
+        style.configure(
+            "Sub.TLabelframe",
+            background=THEME["surface"],
+            bordercolor=THEME["border_soft"],
+            relief="solid",
+            borderwidth=1,
+        )
+        style.configure(
+            "Sub.TLabelframe.Label",
+            background=THEME["surface"],
+            foreground=THEME["text_muted"],
+            font=("Segoe UI", 9, "bold"),
+        )
 
-        style.configure("TButton", background=THEME["surface2"], foreground=THEME["text"], borderwidth=0, padding=(12, 7))
-        style.map("TButton", background=[("active", THEME["border"]), ("pressed", THEME["border"])])
+        style.configure(
+            "TButton",
+            background=THEME["surface2"],
+            foreground=THEME["text"],
+            borderwidth=1,
+            bordercolor=THEME["border_soft"],
+            focuscolor=THEME["surface2"],
+            padding=(12, 8),
+        )
+        style.map(
+            "TButton",
+            background=[("active", THEME["surface3"]), ("pressed", THEME["surface3"]), ("disabled", THEME["surface"])],
+            foreground=[("disabled", THEME["text_muted"])],
+            bordercolor=[("active", THEME["border"]), ("pressed", THEME["accent"])],
+        )
 
         style.configure(
             "Accent.TButton",
             background=THEME["accent"],
-            foreground="#ffffff",
+            foreground="#06111f",
             font=("Segoe UI", 10, "bold"),
             padding=(18, 10),
             borderwidth=1,
-            relief="raised",
+            bordercolor=THEME["accent"],
+            focuscolor=THEME["accent"],
         )
         style.map(
             "Accent.TButton",
-            background=[("active", THEME["accent_hover"]), ("pressed", THEME["accent_hover"])],
-            foreground=[("disabled", "#c8ccd4")],
+            background=[("active", THEME["accent_hover"]), ("pressed", THEME["accent_hover"]), ("disabled", THEME["surface2"])],
+            foreground=[("disabled", THEME["text_muted"])],
+            bordercolor=[("active", THEME["accent_hover"]), ("pressed", THEME["accent_hover"])],
         )
 
-        style.configure("Format.TButton", background=THEME["surface2"], foreground=THEME["text"], padding=(10, 5), font=("Segoe UI", 9, "bold"))
-        style.map("Format.TButton", background=[("active", THEME["accent"]), ("pressed", THEME["accent"])])
+        style.configure(
+            "Nav.TButton",
+            background=THEME["surface"],
+            foreground=THEME["text_muted"],
+            borderwidth=0,
+            padding=(18, 10),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.configure(
+            "NavActive.TButton",
+            background=THEME["accent"],
+            foreground="#06111f",
+            borderwidth=0,
+            padding=(18, 10),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map("Nav.TButton", background=[("active", THEME["surface2"]), ("pressed", THEME["surface2"])])
+        style.map("NavActive.TButton", background=[("active", THEME["accent_hover"]), ("pressed", THEME["accent_hover"])])
+
+        style.configure(
+            "Format.TButton",
+            background=THEME["surface2"],
+            foreground=THEME["text"],
+            padding=(10, 6),
+            borderwidth=1,
+            bordercolor=THEME["border_soft"],
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.map("Format.TButton", background=[("active", THEME["surface3"]), ("pressed", THEME["accent"])])
+        style.configure(
+            "Success.TButton",
+            background=THEME["success"],
+            foreground="#06140c",
+            font=("Segoe UI", 10, "bold"),
+            padding=(14, 9),
+            borderwidth=1,
+            bordercolor=THEME["success"],
+        )
+        style.map("Success.TButton", background=[("active", "#65e29b"), ("pressed", "#65e29b")])
+        style.configure("Toolbutton", background=THEME["surface2"], foreground=THEME["text"], padding=(8, 6), borderwidth=1)
 
         style.configure(
             "TEntry",
@@ -1857,6 +1944,11 @@ class VideoEditorApp:
             lightcolor=THEME["border"],
             darkcolor=THEME["border"],
             padding=(4, 4),
+        )
+        style.map(
+            "TEntry",
+            bordercolor=[("focus", THEME["accent"]), ("!focus", THEME["border"])],
+            fieldbackground=[("disabled", THEME["surface"]), ("!disabled", THEME["surface2"])],
         )
         style.configure(
             "TCombobox",
@@ -1879,16 +1971,35 @@ class VideoEditorApp:
             selectforeground=[("readonly", THEME["text"]), ("!disabled", THEME["text"])],
             background=[("active", THEME["border"]), ("readonly", THEME["surface2"])],
             arrowcolor=[("disabled", THEME["text_muted"]), ("!disabled", THEME["text"])],
+            bordercolor=[("focus", THEME["accent"]), ("!focus", THEME["border"])],
         )
 
         style.configure("TNotebook", background=THEME["bg"], borderwidth=0, tabmargins=(0, 4, 0, 0))
-        style.configure("TNotebook.Tab", background=THEME["surface"], foreground=THEME["text_muted"], padding=(16, 9), font=("Segoe UI", 10))
-        style.map("TNotebook.Tab", background=[("selected", THEME["surface2"])], foreground=[("selected", THEME["text"])])
+        style.configure(
+            "TNotebook.Tab",
+            background=THEME["surface"],
+            foreground=THEME["text_muted"],
+            padding=(18, 9),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", THEME["surface2"]), ("active", THEME["surface2"])],
+            foreground=[("selected", THEME["text"]), ("active", THEME["text"])],
+        )
 
-        style.configure("TCheckbutton", background=THEME["surface"], foreground=THEME["text"])
+        style.configure("TCheckbutton", background=THEME["surface"], foreground=THEME["text"], padding=(0, 2))
+        style.map("TCheckbutton", background=[("active", THEME["surface"])], foreground=[("disabled", THEME["text_muted"])])
         style.configure("Horizontal.TScale", background=THEME["surface"], troughcolor=THEME["surface2"])
-        style.configure("TProgressbar", troughcolor=THEME["surface2"], background=THEME["accent"], borderwidth=0, thickness=6)
+        style.configure("TProgressbar", troughcolor=THEME["surface2"], background=THEME["accent"], borderwidth=0, thickness=8)
         style.configure("TPanedwindow", background=THEME["bg"])
+        style.configure(
+            "TMenubutton",
+            background=THEME["surface2"],
+            foreground=THEME["text"],
+            borderwidth=1,
+            padding=(10, 8),
+        )
         style.configure(
             "Vertical.TScrollbar",
             background=THEME["surface2"],
@@ -1944,42 +2055,41 @@ class VideoEditorApp:
 
     def _wrap_tab_page(self, parent: ttk.Frame) -> ttk.Frame:
         scroll_inner = self._embed_scrollable_frame(parent, bg=THEME["surface"], expand=True)
-        content = ttk.Frame(scroll_inner, padding=12, style="Card.TFrame")
+        content = ttk.Frame(scroll_inner, padding=10, style="Card.TFrame")
         content.pack(fill=tk.BOTH, expand=True)
         return content
 
     def _build_ui(self) -> None:
-        container = ttk.Frame(self.root, padding=16)
+        container = ttk.Frame(self.root, padding=(12, 12, 12, 10), style="Shell.TFrame")
         container.pack(fill=tk.BOTH, expand=True)
 
-        self.footer = ttk.Frame(container)
+        self.footer = ttk.Frame(container, padding=(10, 8), style="Footer.TFrame")
         self.footer.pack(side=tk.BOTTOM, fill=tk.X)
         self.footer.columnconfigure(1, weight=1)
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(
             self.footer,
             textvariable=self.status_var,
-            style="Muted.TLabel",
+            style="FooterMuted.TLabel",
             wraplength=760,
         )
-        self.status_label.grid(row=0, column=1, sticky=tk.EW, padx=(12, 12))
+        self.status_label.grid(row=0, column=1, sticky=tk.EW, padx=(14, 14))
         self.status_label.bind(
             "<Configure>",
             lambda event: self.status_label.configure(wraplength=max(360, event.width - 4)),
         )
         self.progress = ttk.Progressbar(self.footer, mode="indeterminate")
-        self.progress.grid(row=1, column=0, columnspan=3, sticky=tk.EW, pady=(6, 0))
+        self.progress.grid(row=1, column=0, columnspan=3, sticky=tk.EW, pady=(7, 0))
         self.progress.grid_remove()
-        actions = ttk.Frame(self.footer)
+        actions = ttk.Frame(self.footer, style="Footer.TFrame")
         actions.grid(row=0, column=0, sticky=tk.W)
-        actions.columnconfigure(1, weight=1)
-        preset_row = ttk.Frame(actions)
+        preset_row = ttk.Frame(actions, style="Footer.TFrame")
         preset_row.grid(row=0, column=0, sticky=tk.W)
         ttk.Button(preset_row, text="Save Preset", command=self.save_preset).pack(side=tk.LEFT)
-        ttk.Button(preset_row, text="Load Preset", command=self.load_preset).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(preset_row, text="Reset Defaults", command=self.reset_defaults).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(preset_row, text="Load Preset", command=self.load_preset).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(preset_row, text="Reset Defaults", command=self.reset_defaults).pack(side=tk.LEFT, padx=(6, 0))
         undo_btn = ttk.Button(preset_row, text="Undo", command=self.undo_action)
-        undo_btn.pack(side=tk.LEFT, padx=(16, 4))
+        undo_btn.pack(side=tk.LEFT, padx=(12, 4))
         self._create_tooltip(undo_btn, f"Undo last change (Ctrl+Z, up to {UNDO_LIMIT} steps)")
         redo_btn = ttk.Button(preset_row, text="Redo", command=self.redo_action)
         redo_btn.pack(side=tk.LEFT)
@@ -1992,9 +2102,12 @@ class VideoEditorApp:
         )
         self.export_btn.grid(row=0, column=2, sticky=tk.E)
 
-        nav = ttk.Frame(container)
+        nav = ttk.Frame(container, padding=(10, 8), style="Nav.TFrame")
         nav.pack(side=tk.TOP, fill=tk.X, pady=(0, 10))
-        nav.columnconfigure(3, weight=1)
+        nav.columnconfigure(2, weight=1)
+        ttk.Label(nav, text="Shorts Maker", style="Brand.TLabel").grid(row=0, column=0, sticky=tk.W, padx=(2, 16))
+        nav_buttons = ttk.Frame(nav, style="Nav.TFrame")
+        nav_buttons.grid(row=0, column=1, sticky=tk.W)
         for col, (section_id, label) in enumerate(
             (
                 ("video", "Video Editing"),
@@ -2002,16 +2115,22 @@ class VideoEditorApp:
                 ("upload", "Upload to YouTube"),
             )
         ):
-            btn = ttk.Button(nav, text=label, command=lambda sid=section_id: self._show_section(sid))
-            btn.grid(row=0, column=col, sticky=tk.W, padx=(0 if col == 0 else 8, 0))
+            btn = ttk.Button(
+                nav_buttons,
+                text=label,
+                style="Nav.TButton",
+                command=lambda sid=section_id: self._show_section(sid),
+            )
+            btn.grid(row=0, column=col, sticky=tk.W, padx=(0 if col == 0 else 6, 0))
             self._section_buttons[section_id] = btn
+        ttk.Label(nav, text="1080x1920 workspace", style="Pill.TLabel").grid(row=0, column=3, sticky=tk.E, padx=(12, 2))
 
-        section_host = ttk.Frame(container)
+        section_host = ttk.Frame(container, style="Shell.TFrame")
         section_host.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        video_section = ttk.Frame(section_host)
-        description_section = ttk.Frame(section_host)
-        upload_section = ttk.Frame(section_host)
+        video_section = ttk.Frame(section_host, style="Shell.TFrame")
+        description_section = ttk.Frame(section_host, style="Shell.TFrame")
+        upload_section = ttk.Frame(section_host, style="Shell.TFrame")
         self._section_frames = {
             "video": video_section,
             "description": description_section,
@@ -2026,7 +2145,7 @@ class VideoEditorApp:
         ttk.Label(title_col, text="Shorts Maker", style="Title.TLabel").pack(anchor=tk.W)
         self.subtitle_label = ttk.Label(
             title_col,
-            text="Create vertical 1080×1920 videos for YouTube Shorts, TikTok & Reels",
+            text="Create vertical 1080x1920 videos for YouTube Shorts, TikTok & Reels",
             style="Subtitle.TLabel",
             wraplength=680,
         )
@@ -2039,25 +2158,25 @@ class VideoEditorApp:
         body = ttk.Panedwindow(video_section, orient=tk.HORIZONTAL)
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        left_outer = ttk.Frame(body)
-        right = ttk.Frame(body, padding=(10, 0, 0, 0))
+        left_outer = ttk.Frame(body, style="Shell.TFrame")
+        right = ttk.Frame(body, padding=(12, 0, 0, 0), style="Shell.TFrame")
         body.add(left_outer, weight=2)
-        body.add(right, weight=4)
+        body.add(right, weight=5)
         try:
-            body.paneconfigure(left_outer, minsize=500)
-            body.paneconfigure(right, minsize=520)
+            body.paneconfigure(left_outer, minsize=470)
+            body.paneconfigure(right, minsize=620)
         except tk.TclError:
             pass
         left = self._embed_scrollable_frame(left_outer, bg=THEME["bg"], expand=True, padx=0, pady=0)
 
-        video_frame = ttk.LabelFrame(left, text="  Video Input  ", padding=10, style="Card.TLabelframe")
+        video_frame = ttk.LabelFrame(left, text="  Video Input  ", padding=12, style="Card.TLabelframe")
         video_frame.pack(fill=tk.X, pady=(0, 10))
         video_row = ttk.Frame(video_frame, style="Card.TFrame")
         video_row.pack(fill=tk.X)
         video_row.columnconfigure(0, weight=1)
         self.video_path_var = tk.StringVar()
         ttk.Entry(video_row, textvariable=self.video_path_var).grid(row=0, column=0, sticky=tk.EW, ipady=4)
-        ttk.Button(video_row, text="Browse", command=self.select_video).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(video_row, text="Browse Video", command=self.select_video).grid(row=0, column=1, padx=(8, 0))
 
         self.repeat_clip_twice_var = tk.BooleanVar(value=False)
         self.clip1_trim_start_var = tk.StringVar(value="0")
@@ -2067,20 +2186,26 @@ class VideoEditorApp:
         self.trim_summary_var = tk.StringVar(value="Clip 1: full | Clip 2: full")
         clip_row = ttk.Frame(video_frame, style="Card.TFrame")
         clip_row.pack(fill=tk.X, pady=(8, 0))
+        clip_row.columnconfigure(2, weight=1)
         ttk.Checkbutton(
             clip_row,
             text="Repeat video twice",
             variable=self.repeat_clip_twice_var,
-        ).pack(side=tk.LEFT)
-        ttk.Button(clip_row, text="Trim Clips", command=self.open_trim_clips_dialog).pack(side=tk.LEFT, padx=(8, 0))
+        ).grid(row=0, column=0, sticky=tk.W)
+        ttk.Button(clip_row, text="Trim Clips", command=self.open_trim_clips_dialog).grid(
+            row=0,
+            column=1,
+            sticky=tk.W,
+            padx=(8, 0),
+        )
         ttk.Label(
             clip_row,
             textvariable=self.trim_summary_var,
             style="CardMuted.TLabel",
             wraplength=360,
-        ).pack(side=tk.LEFT, padx=(10, 0), fill=tk.X, expand=True)
+        ).grid(row=0, column=2, sticky=tk.EW, padx=(10, 0))
 
-        text_frame = ttk.LabelFrame(left, text="  Overlay Text  ", padding=10, style="Card.TLabelframe")
+        text_frame = ttk.LabelFrame(left, text="  Overlay Text  ", padding=12, style="Card.TLabelframe")
         text_frame.pack(fill=tk.X, pady=(0, 10))
         self.font_color_var = tk.StringVar(value="#FFFFFF")
         self.selection_color_var = tk.StringVar(value="#FF5555")
@@ -2121,7 +2246,7 @@ class VideoEditorApp:
         for col, overlay_id in enumerate(("title", "footer")):
             self._create_overlay_text_box(boxes_row, overlay_id, col)
 
-        tab_holder = tk.Frame(left, bg=THEME["bg"], height=420)
+        tab_holder = tk.Frame(left, bg=THEME["bg"], height=370)
         tab_holder.pack(fill=tk.X, pady=(0, 10))
         tab_holder.pack_propagate(False)
         notebook = ttk.Notebook(tab_holder)
@@ -2157,18 +2282,19 @@ class VideoEditorApp:
             self.footer.pack_forget()
 
         for sid, btn in self._section_buttons.items():
-            btn.configure(style="Accent.TButton" if sid == section_id else "TButton")
+            btn.configure(style="NavActive.TButton" if sid == section_id else "Nav.TButton")
 
     def _build_description_section(self, parent: ttk.Frame) -> None:
-        parent.columnconfigure(0, weight=1)
-        parent.columnconfigure(1, weight=2)
+        parent.columnconfigure(0, weight=2)
+        parent.columnconfigure(1, weight=3)
         parent.rowconfigure(0, weight=1)
 
-        left = ttk.Frame(parent)
+        left = ttk.Frame(parent, style="Shell.TFrame")
         left.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 10))
         left.columnconfigure(0, weight=1)
+        left.rowconfigure(1, weight=1)
 
-        api_box = ttk.LabelFrame(left, text="  GPT Setup  ", padding=10, style="Card.TLabelframe")
+        api_box = ttk.LabelFrame(left, text="  GPT Setup  ", padding=12, style="Card.TLabelframe")
         api_box.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
         api_box.columnconfigure(1, weight=1)
         self.openai_model_var = tk.StringVar(value="gpt-5.5")
@@ -2181,28 +2307,30 @@ class VideoEditorApp:
             state="readonly",
         ).grid(row=0, column=1, sticky=tk.EW, padx=(8, 0))
 
-        prompt_box = ttk.LabelFrame(left, text="  Prompts  ", padding=10, style="Card.TLabelframe")
-        prompt_box.grid(row=1, column=0, sticky=tk.EW)
+        prompt_box = ttk.LabelFrame(left, text="  Prompts  ", padding=12, style="Card.TLabelframe")
+        prompt_box.grid(row=1, column=0, sticky=tk.NSEW)
         prompt_box.columnconfigure(0, weight=1)
+        prompt_box.rowconfigure(1, weight=1)
+        prompt_box.rowconfigure(3, weight=1)
         ttk.Label(prompt_box, text="System Prompt", style="CardMuted.TLabel").grid(row=0, column=0, sticky=tk.W)
-        self.metadata_system_prompt_text = self._create_auto_text(prompt_box, height=5)
-        self.metadata_system_prompt_text.grid(row=1, column=0, sticky=tk.EW, pady=(4, 10))
+        self.metadata_system_prompt_text = self._create_auto_text(prompt_box, height=6)
+        self.metadata_system_prompt_text.grid(row=1, column=0, sticky=tk.NSEW, pady=(4, 10))
         ttk.Label(prompt_box, text="User Prompt", style="CardMuted.TLabel").grid(row=2, column=0, sticky=tk.W)
-        self.metadata_user_prompt_text = self._create_auto_text(prompt_box, height=5)
-        self.metadata_user_prompt_text.grid(row=3, column=0, sticky=tk.EW, pady=(4, 0))
+        self.metadata_user_prompt_text = self._create_auto_text(prompt_box, height=6)
+        self.metadata_user_prompt_text.grid(row=3, column=0, sticky=tk.NSEW, pady=(4, 0))
 
-        actions = ttk.Frame(left)
+        actions = ttk.Frame(left, style="Shell.TFrame")
         actions.grid(row=2, column=0, sticky=tk.EW, pady=(10, 0))
         self.generate_metadata_btn = ttk.Button(actions, text="Generate Metadata", command=self.generate_metadata)
         self.generate_metadata_btn.pack(side=tk.LEFT)
         ttk.Button(actions, text="Save Metadata", command=self._save_current_editor_state).pack(side=tk.LEFT, padx=(8, 0))
 
-        right = ttk.Frame(parent)
+        right = ttk.Frame(parent, style="Shell.TFrame")
         right.grid(row=0, column=1, sticky=tk.NSEW)
         right.columnconfigure(0, weight=1)
         right.rowconfigure(3, weight=1)
 
-        video_text_box = ttk.LabelFrame(right, text="  Video Top Text  ", padding=10, style="Card.TLabelframe")
+        video_text_box = ttk.LabelFrame(right, text="  Video Top Text  ", padding=12, style="Card.TLabelframe")
         video_text_box.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
         video_text_box.columnconfigure(0, weight=1)
         video_text_box.rowconfigure(0, weight=1)
@@ -2210,9 +2338,12 @@ class VideoEditorApp:
         self.generated_video_text_text.grid(row=0, column=0, sticky=tk.NSEW, pady=2)
         ttk.Button(video_text_box, text="Update", command=self.apply_generated_video_text).grid(row=0, column=1, padx=(8, 0), sticky=tk.NSEW)
 
-        voiceover_box = ttk.LabelFrame(right, text="  Voiceover  ", padding=10, style="Card.TLabelframe")
+        voiceover_box = ttk.LabelFrame(right, text="  Voiceover  ", padding=12, style="Card.TLabelframe")
         voiceover_box.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
         voiceover_box.columnconfigure(0, weight=1)
+        voiceover_box.columnconfigure(1, weight=1)
+        voiceover_box.columnconfigure(2, weight=1)
+        voiceover_box.columnconfigure(3, weight=1)
         self.ai_voiceover_var = tk.StringVar()
         self.voiceover_voice_var = tk.StringVar(value="cedar")
         self.voiceover_audio_path_var = tk.StringVar()
@@ -2258,40 +2389,52 @@ class VideoEditorApp:
             style="CardMuted.TLabel",
         ).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(6, 0))
 
-        title_box = ttk.LabelFrame(right, text="  Title  ", padding=10, style="Card.TLabelframe")
+        title_box = ttk.LabelFrame(right, text="  Title  ", padding=12, style="Card.TLabelframe")
         title_box.grid(row=2, column=0, sticky=tk.EW, pady=(0, 10))
         self.ai_title_var = tk.StringVar()
         ttk.Entry(title_box, textvariable=self.ai_title_var).pack(fill=tk.X, ipady=4)
 
-        desc_box = ttk.LabelFrame(right, text="  Description  ", padding=10, style="Card.TLabelframe")
+        desc_box = ttk.LabelFrame(right, text="  Description  ", padding=12, style="Card.TLabelframe")
         desc_box.grid(row=3, column=0, sticky=tk.NSEW, pady=(0, 10))
         self.ai_description_text = self._create_auto_text(desc_box, height=14)
         self.ai_description_text.pack(fill=tk.BOTH, expand=True)
 
-        tags_box = ttk.LabelFrame(right, text="  Tags  ", padding=10, style="Card.TLabelframe")
+        tags_box = ttk.LabelFrame(right, text="  Tags  ", padding=12, style="Card.TLabelframe")
         tags_box.grid(row=4, column=0, sticky=tk.EW)
         self.ai_tags_var = tk.StringVar()
         ttk.Entry(tags_box, textvariable=self.ai_tags_var).pack(fill=tk.X, ipady=4)
 
     def _build_upload_section(self, parent: ttk.Frame) -> None:
-        parent.columnconfigure(0, weight=1)
+        parent.columnconfigure(0, weight=2)
+        parent.columnconfigure(1, weight=3)
+        parent.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(parent, style="Shell.TFrame")
+        left.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 10))
+        left.columnconfigure(0, weight=1)
+
+        right = ttk.Frame(parent, style="Shell.TFrame")
+        right.grid(row=0, column=1, sticky=tk.NSEW)
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(0, weight=1)
 
         # 1. Video File Selector
-        video_box = ttk.LabelFrame(parent, text="  Video File  ", padding=10, style="Card.TLabelframe")
+        video_box = ttk.LabelFrame(left, text="  Video File  ", padding=12, style="Card.TLabelframe")
         video_box.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
         video_box.columnconfigure(0, weight=1)
         self.upload_video_var = tk.StringVar()
         ttk.Entry(video_box, textvariable=self.upload_video_var).grid(row=0, column=0, sticky=tk.EW, ipady=4)
         
-        btn_frame = ttk.Frame(video_box)
+        btn_frame = ttk.Frame(video_box, style="Card.TFrame")
         btn_frame.grid(row=0, column=1, padx=(8, 0))
         ttk.Button(btn_frame, text="Browse", command=self.browse_upload_video).pack(side=tk.LEFT)
         ttk.Button(btn_frame, text="Fetch Video from Editor", command=self.fetch_video_and_metadata).pack(side=tk.LEFT, padx=(8, 0))
 
         # 2. Dedicated Metadata Fields
-        metadata_box = ttk.LabelFrame(parent, text="  YouTube Metadata  ", padding=10, style="Card.TLabelframe")
-        metadata_box.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
+        metadata_box = ttk.LabelFrame(right, text="  YouTube Metadata  ", padding=12, style="Card.TLabelframe")
+        metadata_box.grid(row=0, column=0, sticky=tk.NSEW)
         metadata_box.columnconfigure(0, weight=1)
+        metadata_box.rowconfigure(3, weight=1)
 
         ttk.Label(metadata_box, text="Title", style="CardMuted.TLabel").grid(row=0, column=0, sticky=tk.W)
         self.upload_title_var = tk.StringVar()
@@ -2299,15 +2442,15 @@ class VideoEditorApp:
 
         ttk.Label(metadata_box, text="Description", style="CardMuted.TLabel").grid(row=2, column=0, sticky=tk.W)
         self.upload_description_text = self._create_auto_text(metadata_box, height=6)
-        self.upload_description_text.grid(row=3, column=0, sticky=tk.EW, pady=(2, 8))
+        self.upload_description_text.grid(row=3, column=0, sticky=tk.NSEW, pady=(2, 8))
 
         ttk.Label(metadata_box, text="Tags", style="CardMuted.TLabel").grid(row=4, column=0, sticky=tk.W)
         self.upload_tags_var = tk.StringVar()
         ttk.Entry(metadata_box, textvariable=self.upload_tags_var).grid(row=5, column=0, sticky=tk.EW, ipady=4, pady=(2, 0))
 
         # 3. Schedule Settings
-        schedule_box = ttk.LabelFrame(parent, text="  Schedule  ", padding=10, style="Card.TLabelframe")
-        schedule_box.grid(row=2, column=0, sticky=tk.EW, pady=(0, 10))
+        schedule_box = ttk.LabelFrame(left, text="  Schedule  ", padding=12, style="Card.TLabelframe")
+        schedule_box.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
         schedule_box.columnconfigure(1, weight=1)
         
         self.upload_queue_var = tk.BooleanVar(value=True)
@@ -2334,22 +2477,23 @@ class VideoEditorApp:
         ttk.Entry(schedule_box, textvariable=self.upload_time_var, state="readonly").grid(row=3, column=1, sticky=tk.EW, padx=(8, 0), pady=(8, 0))
 
         # 4. Connection & Upload History Box
-        history_box = ttk.LabelFrame(parent, text="  Last Uploaded Video  ", padding=10, style="Card.TLabelframe")
-        history_box.grid(row=3, column=0, sticky=tk.EW, pady=(0, 10))
+        history_box = ttk.LabelFrame(left, text="  Last Uploaded Video  ", padding=12, style="Card.TLabelframe")
+        history_box.grid(row=2, column=0, sticky=tk.EW, pady=(0, 10))
         history_box.columnconfigure(0, weight=1)
 
-        self.last_upload_title_lbl = ttk.Label(history_box, text="Title: None", font=("Segoe UI", 9, "bold"))
+        self.last_upload_title_lbl = ttk.Label(history_box, text="Title: None", style="Card.TLabel", font=("Segoe UI", 9, "bold"))
         self.last_upload_title_lbl.grid(row=0, column=0, sticky=tk.W)
 
         self.last_upload_time_lbl = ttk.Label(history_box, text="Scheduled/Uploaded: Never", style="CardMuted.TLabel")
         self.last_upload_time_lbl.grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
 
         # 5. Actions Row
-        actions = ttk.Frame(parent)
-        actions.grid(row=4, column=0, sticky=tk.EW)
+        actions = ttk.Frame(left, style="Shell.TFrame")
+        actions.grid(row=3, column=0, sticky=tk.EW)
+        actions.columnconfigure(1, weight=1)
         
         # Connection Setup Frame (Slot 1, column 0)
-        self.yt_setup_frame = ttk.Frame(actions)
+        self.yt_setup_frame = ttk.Frame(actions, style="Shell.TFrame")
         self.yt_setup_frame.grid(row=0, column=0, sticky=tk.W)
         
         self.connect_yt_btn = ttk.Button(self.yt_setup_frame, text="Connect YouTube", command=self.youtube_connect_start)
@@ -2360,15 +2504,15 @@ class VideoEditorApp:
         self.yt_menu.add_command(label="Import client_secrets.json...", command=self.import_client_secrets)
         self.yt_menu.add_command(label="Disconnect / Sign Out", command=self.disconnect_youtube)
         
-        self.yt_opt_btn = ttk.Menubutton(self.yt_setup_frame, text="▼")
+        self.yt_opt_btn = ttk.Menubutton(self.yt_setup_frame, text="v")
         self.yt_opt_btn.pack(side=tk.LEFT, padx=(4, 0))
         self.yt_opt_btn["menu"] = self.yt_menu
 
         # Frame for active channel connection state (Slot 2, column 0 - overlaps Setup Frame)
-        self.channel_status_frame = ttk.Frame(actions)
+        self.channel_status_frame = ttk.Frame(actions, style="Shell.TFrame")
         self.channel_status_frame.grid(row=0, column=0, sticky=tk.W)
         
-        self.channel_name_lbl = ttk.Label(self.channel_status_frame, text="Connected: Loading...", font=("Segoe UI", 9, "bold"))
+        self.channel_name_lbl = ttk.Label(self.channel_status_frame, text="Connected: Loading...", style="Muted.TLabel", font=("Segoe UI", 9, "bold"))
         self.channel_name_lbl.pack(side=tk.LEFT)
         
         self.disconnect_link = ttk.Button(self.channel_status_frame, text="Disconnect", style="Toolbutton", command=self.disconnect_youtube)
@@ -2376,7 +2520,7 @@ class VideoEditorApp:
 
         # Upload / Schedule button (Slot 3, column 1)
         self.upload_btn = ttk.Button(actions, text="Upload / Schedule", style="Accent.TButton", command=self.youtube_upload_start)
-        self.upload_btn.grid(row=0, column=1, padx=(8, 0), sticky=tk.W)
+        self.upload_btn.grid(row=0, column=1, padx=(8, 0), sticky=tk.E)
 
         # Check and set button visibility based on credentials files
         self.update_youtube_buttons_visibility()
@@ -2843,11 +2987,15 @@ class VideoEditorApp:
             bg=THEME["surface2"],
             fg=THEME["text"],
             insertbackground=THEME["accent"],
-            relief=tk.SOLID,
-            bd=1,
-            padx=8,
-            pady=8,
-            highlightthickness=0,
+            selectbackground=THEME["accent"],
+            selectforeground="#06111f",
+            relief=tk.FLAT,
+            bd=0,
+            padx=10,
+            pady=9,
+            highlightthickness=1,
+            highlightbackground=THEME["border_soft"],
+            highlightcolor=THEME["accent"],
         )
         widget._min_height = height
 
@@ -3035,8 +3183,8 @@ class VideoEditorApp:
     def _grid_field_box(
         self, parent: ttk.Frame, title: str, row: int, column: int, columnspan: int = 1
     ) -> ttk.LabelFrame:
-        box = ttk.LabelFrame(parent, text=f"  {title}  ", padding=8, style="Sub.TLabelframe")
-        box.grid(row=row, column=column, columnspan=columnspan, sticky=tk.NSEW, padx=4, pady=4)
+        box = ttk.LabelFrame(parent, text=f"  {title}  ", padding=9, style="Sub.TLabelframe")
+        box.grid(row=row, column=column, columnspan=columnspan, sticky=tk.NSEW, padx=5, pady=5)
         return box
 
     def open_trim_clips_dialog(self) -> None:
@@ -3619,7 +3767,8 @@ class VideoEditorApp:
     def _refresh_overlay_highlights(self) -> None:
         for overlay_id, frame in self._overlay_frames.items():
             color = THEME["accent"] if overlay_id == self._active_overlay_id else THEME["border"]
-            frame.configure(bg=color)
+            text_color = "#06111f" if overlay_id == self._active_overlay_id else THEME["text_muted"]
+            frame.configure(bg=color, fg=text_color)
 
     def _select_overlay(self, overlay_id: str) -> None:
         if overlay_id == self._active_overlay_id or self._suspend_overlay_switch:
@@ -3665,35 +3814,37 @@ class VideoEditorApp:
             parent,
             text=f"  {labels.get(overlay_id, overlay_id)}  ",
             bg=THEME["border"],
-            fg=THEME["accent"],
+            fg=THEME["text_muted"],
             font=("Segoe UI", 9, "bold"),
-            bd=1,
-            relief=tk.SOLID,
+            bd=0,
+            relief=tk.FLAT,
             highlightthickness=0,
             labelanchor="nw",
-            padx=2,
-            pady=2,
+            padx=3,
+            pady=3,
         )
-        frame.grid(row=0, column=column, sticky=tk.NSEW, padx=(0 if column == 0 else 4, 0))
+        frame.grid(row=0, column=column, sticky=tk.NSEW, padx=(0 if column == 0 else 6, 0))
         self._overlay_frames[overlay_id] = frame
 
-        inner = tk.Frame(frame, bg=THEME["surface2"])
+        inner = tk.Frame(frame, bg=THEME["surface"])
         inner.pack(fill=tk.BOTH, expand=True)
         widget = scrolledtext.ScrolledText(
             inner,
-            height=3 if overlay_id == "footer" else 4,
+            height=4,
             wrap=tk.WORD,
             font=("Segoe UI", 11),
             bg=THEME["surface2"],
             fg=THEME["text"],
             insertbackground=THEME["accent"],
             selectbackground=THEME["accent"],
-            selectforeground="#ffffff",
-            relief=tk.SOLID,
-            bd=1,
+            selectforeground="#06111f",
+            relief=tk.FLAT,
+            bd=0,
             padx=8,
             pady=6,
-            highlightthickness=0,
+            highlightthickness=1,
+            highlightbackground=THEME["border_soft"],
+            highlightcolor=THEME["accent"],
         )
         widget.pack(fill=tk.BOTH, expand=True)
         widget.bind("<FocusIn>", lambda _e, oid=overlay_id: self._on_overlay_focus(oid))
@@ -3923,7 +4074,7 @@ class VideoEditorApp:
                 apply_color_to_range(widget, idx, end, default)
 
     def _build_preview_panel(self, parent: ttk.Frame) -> None:
-        panel = ttk.LabelFrame(parent, text="  Live Preview  ", padding=8, style="Card.TLabelframe")
+        panel = ttk.LabelFrame(parent, text="  Live Preview  ", padding=10, style="Card.TLabelframe")
         panel.pack(fill=tk.BOTH, expand=True)
 
         self.preview_wrap = tk.Frame(
@@ -3934,7 +4085,7 @@ class VideoEditorApp:
             width=self.preview_display_w,
             height=self.preview_display_h,
         )
-        self.preview_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 6))
+        self.preview_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 8))
         self.preview_wrap.pack_propagate(False)
         self.preview_wrap.bind("<Configure>", self._on_preview_wrap_configure)
         self.preview_canvas = tk.Canvas(
@@ -3949,16 +4100,15 @@ class VideoEditorApp:
 
         bottom = ttk.Frame(panel, style="Card.TFrame")
         bottom.pack(side=tk.BOTTOM, fill=tk.X)
-        bottom.columnconfigure(0, weight=3)
-        bottom.columnconfigure(1, weight=2)
+        bottom.columnconfigure(0, weight=1)
 
         self.preview_var_detail = tk.StringVar(value="")
 
-        timeline_box = ttk.LabelFrame(bottom, text="  Timeline  ", padding=3, style="Sub.TLabelframe")
-        timeline_box.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 3))
+        timeline_box = ttk.LabelFrame(bottom, text="  Timeline  ", padding=6, style="Sub.TLabelframe")
+        timeline_box.grid(row=0, column=0, sticky=tk.EW)
 
         timeline_times_row = ttk.Frame(timeline_box, style="Card.TFrame")
-        timeline_times_row.pack(fill=tk.X, pady=(0, 2))
+        timeline_times_row.pack(fill=tk.X, pady=(0, 3))
         self.timeline_start_var = tk.StringVar(value="0:00")
         self.timeline_end_var = tk.StringVar(value="0:00")
         ttk.Label(timeline_times_row, textvariable=self.timeline_start_var, style="Card.TLabel", width=6).pack(
@@ -3978,7 +4128,7 @@ class VideoEditorApp:
         timeline_wrap.pack(fill=tk.X)
         self.timeline_canvas = tk.Canvas(
             timeline_wrap,
-            height=34,
+            height=42,
             bg=THEME["surface2"],
             highlightthickness=0,
             cursor="hand2",
@@ -3996,12 +4146,12 @@ class VideoEditorApp:
         self._sound_marker_x = -1
 
         controls_row = ttk.Frame(bottom, style="Card.TFrame")
-        controls_row.grid(row=0, column=1, sticky=tk.NSEW, padx=(3, 0))
-        controls_row.columnconfigure(0, weight=2)
-        controls_row.columnconfigure(1, weight=3)
+        controls_row.grid(row=1, column=0, sticky=tk.EW, pady=(8, 0))
+        controls_row.columnconfigure(0, weight=3)
+        controls_row.columnconfigure(1, weight=2)
 
-        zoom_box = ttk.LabelFrame(controls_row, text="  Zoom  ", padding=3, style="Sub.TLabelframe")
-        zoom_box.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 3))
+        zoom_box = ttk.LabelFrame(controls_row, text="  Zoom  ", padding=6, style="Sub.TLabelframe")
+        zoom_box.grid(row=0, column=0, sticky=tk.EW, padx=(0, 4))
         zoom_row = ttk.Frame(zoom_box, style="Card.TFrame")
         zoom_row.pack(fill=tk.X)
         ttk.Button(zoom_row, text="-", width=3, command=lambda: self._nudge_zoom(-0.05)).pack(side=tk.LEFT)
@@ -4024,14 +4174,14 @@ class VideoEditorApp:
             sliderrelief=tk.FLAT,
             borderwidth=0,
         )
-        self.zoom_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.zoom_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
         self.zoom_slider.bind("<ButtonPress-1>", self._on_zoom_drag_start)
         ttk.Button(zoom_row, text="+", width=3, command=lambda: self._nudge_zoom(0.05)).pack(side=tk.LEFT)
         self.zoom_label_var = tk.StringVar(value="1.00x")
         ttk.Label(zoom_box, textvariable=self.zoom_label_var, style="Card.TLabel").pack(anchor=tk.E, pady=(2, 0))
 
-        playback_box = ttk.LabelFrame(controls_row, text="  Playback  ", padding=3, style="Sub.TLabelframe")
-        playback_box.grid(row=0, column=1, sticky=tk.NSEW, padx=(3, 0))
+        playback_box = ttk.LabelFrame(controls_row, text="  Playback  ", padding=6, style="Sub.TLabelframe")
+        playback_box.grid(row=0, column=1, sticky=tk.EW, padx=(4, 0))
         play_row = ttk.Frame(playback_box, style="Card.TFrame")
         play_row.pack(fill=tk.X)
         self.play_btn = ttk.Button(play_row, text="Play", command=self.toggle_play)
@@ -4131,7 +4281,7 @@ class VideoEditorApp:
 
         ttk.Label(
             parent,
-            text=f"Output canvas is fixed at {CANVAS_WIDTH}×{CANVAS_HEIGHT}. "
+            text=f"Output canvas is fixed at {CANVAS_WIDTH}x{CANVAS_HEIGHT}. "
             "Fit mode keeps the full video visible with padding.",
             style="CardMuted.TLabel",
             wraplength=420,
